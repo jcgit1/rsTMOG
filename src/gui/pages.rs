@@ -434,6 +434,17 @@ pub fn thermals_ui(ui: &mut egui::Ui, s: &Snapshot) {
     if let Some(t) = &s.cpu_temp {
         ui.heading(format!("CPU: {:.0}°C  {} [{}]", t.value, t.label, t.chip));
     }
+    if !s.hist_temp.is_empty() {
+        let m = hist_model(
+            "temp",
+            egui::Color32::from_rgb(230, 140, 60),
+            &s.hist_temp,
+            WINDOW,
+            false,
+        );
+        super::graph::graph_ui(ui, &m, 120.0);
+        ui.add_space(6.0);
+    }
     let mut last_chip = "";
     egui::Grid::new("thermals")
         .num_columns(2)

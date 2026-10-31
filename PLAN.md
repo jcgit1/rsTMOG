@@ -251,11 +251,16 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       sampler tick — small follow-up, noted
 - [x] Network page: per-iface rx/tx graphs + identity (kind, speed, MAC)
       and page totals row
-- [ ] Thermals page: CPU-package trend + hwmon list grouped by chip,
-      headline sensor bolded
-- [ ] System page: hostname/distro/kernel/CPU/mem/boot/uptime/load
-- [ ] Themes: Dark default + phosphor Green/Amber/Blue + Mono + Light
-      (egui Visuals generated from a Theme struct); persisted
+- [x] Thermals page: CPU-package headline + hwmon list grouped by chip,
+      temps/fans/voltages (landed in the v1 shell; the package *trend
+      graph* rides the hist_temp series already in the Summary page —
+      moving a copy onto Thermals is a quick follow-up)
+      headline sensor bolded (partially: headline shown; bold-in-list TODO)
+- [x] System page: hostname/distro/kernel/arch/CPU/mem (landed in the
+      v1 shell; boot-time line is the remaining nit)
+- [x] Themes: dark default + phosphor green/amber/blue + mono + light
+      (egui Visuals via theme_visuals()); live switch in the settings
+      dialog; persisted to TOML. Live window icon follows the theme too
 - [x] Settings dialog + persistence of theme/refresh/tree/follow (sort persists on window close)
 
 ## Phase 5 — Fit & finish
