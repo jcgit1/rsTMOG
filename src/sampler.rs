@@ -156,22 +156,9 @@ impl Sampler {
         }
     }
 
-    /// The tick number of the last completed tick (bench).
-    pub fn tick_no(&self) -> u64 {
-        self.tick
-    }
-
     /// Did the last completed tick refresh process rows? (bench/classify)
     pub fn last_tick_was_row(&self) -> bool {
         self.last_was_row
-    }
-
-    /// Did the last completed tick also refresh hwmon temps? (bench: the
-    /// hwmon tier runs ~29 ms and rides the same cadence as rows in name
-    /// only — the process block runs first and flips `last_was_row` late,
-    /// so benches must not infer hwmon work from `last_tick_was_row`.)
-    pub fn last_tick_had_hwmon(&self) -> bool {
-        self.last_hwmon
     }
 
     /// Ask the sampler to fully populate (rss/cmdline/user) these pids on
