@@ -209,8 +209,9 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
 
 ## Phase 4 — GUI (egui). Each page: renders from Sampler snapshots only
 
-- [ ] App shell: sidebar nav, page stack, status footer, tick loop
-      (`Sampler` on a thread or `wg.tick` timer; refresh 0.5/1/2 s)
+- [x] App shell: sidebar nav (8 pages), page stack, status footer
+      (uptime/load/procs/GPU%/temp), background tick loop at the user's
+      refresh cadence (Phase 4.5 `SamplerHandle` thread)
 - [x] Graph widget: scrolling history (newest pinned right), autoscale
       (peak-hold follower: rises fast, falls slow), quarter grid +
       percent-mode 0/25/50/75/100 labels; `window_to_ui` mapping is a
