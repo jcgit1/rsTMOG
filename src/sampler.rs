@@ -3,18 +3,18 @@
 //! Runs on eframe's request_repaint timer (refresh_ms), never blocks the
 //! paint path.
 
-use crate::core::cpu::{self, CpuJiffies};
-use crate::core::diskstats::DiskCounters;
-use crate::core::gpu::{GpuInfo, Nvml};
-use crate::core::loadavg::LoadAvg;
-use crate::core::meminfo::Meminfo;
-use crate::core::netdev::NetDevCounters;
-use crate::core::pressure::PsiAvg;
-use crate::core::process_table::Row;
-use crate::core::sysinfo::SysInfo;
-use crate::core::zfs::ArcStats;
 use std::path::PathBuf;
 use std::time::Instant;
+use tmog_core::cpu::{self, CpuJiffies};
+use tmog_core::diskstats::DiskCounters;
+use tmog_core::gpu::{GpuInfo, Nvml};
+use tmog_core::loadavg::LoadAvg;
+use tmog_core::meminfo::Meminfo;
+use tmog_core::netdev::NetDevCounters;
+use tmog_core::pressure::PsiAvg;
+use tmog_core::process_table::Row;
+use tmog_core::sysinfo::SysInfo;
+use tmog_core::zfs::ArcStats;
 
 /// Everything a page can read, computed once per tick.
 #[derive(Debug, Clone, Default)]
@@ -33,8 +33,8 @@ pub struct Snapshot {
     pub procs: Vec<Row>,
     pub disks: Vec<DiskCounters>,
     pub nets: Vec<NetDevCounters>,
-    pub temps: Vec<crate::core::hwmon::Reading>,
-    pub cpu_temp: Option<crate::core::hwmon::Reading>,
+    pub temps: Vec<tmog_core::hwmon::Reading>,
+    pub cpu_temp: Option<tmog_core::hwmon::Reading>,
     pub gpu: Option<GpuInfo>,
     pub psi_memory: Option<(PsiAvg, Option<PsiAvg>)>,
     pub psi_io: Option<(PsiAvg, Option<PsiAvg>)>,
@@ -85,7 +85,7 @@ impl Sampler {
     /// Fixture-root constructor (tests / self-checks against trees).
     pub fn with_root(root: PathBuf) -> Self {
         let passwd = std::fs::read_to_string(root.join("etc/passwd"))
-            .map(|s| crate::core::process::parse_passwd(&s))
+            .map(|s| tmog_core::process::parse_passwd(&s))
             .unwrap_or_default();
         Sampler {
             root,
@@ -137,7 +137,7 @@ impl Sampler {
         let root = self.root.as_path();
 
         // ---- cpu ----------------------------------------------------
-        if let Ok(text) = crate::core::fs::read_under(root, "proc/stat") {
+        if let Ok(text) = tmog_core::fs::read_under(root, "proc/stat") {
             let rows: Vec<CpuJiffies> = text.lines().filter_map(cpu::parse_cpu_line).collect();
             if !self.prev_cpu.is_empty() {
                 let mut per_core = Vec::new();
@@ -169,9 +169,9 @@ impl Sampler {
         }
 
         // ---- meminfo + zfs arc --------------------------------------
-        self.snapshot.arc = crate::core::zfs::collect(root);
-        if let Ok(m) = crate::core::meminfo::collect(root) {
-            self.snapshot.mem_arc_adjusted = Some(crate::core::zfs::arc_adjusted_meminfo(
+        self.snapshot.arc = tmog_core::zfs::collect(root);
+        if let Ok(m) = tmog_core::meminfo::collect(root) {
+            self.snapshot.mem_arc_adjusted = Some(tmog_core::zfs::arc_adjusted_meminfo(
                 &m,
                 self.snapshot.arc.as_ref(),
             ));
@@ -179,16 +179,15 @@ impl Sampler {
         }
 
         // ---- load / uptime ------------------------------------------
-        self.snapshot.load = crate::core::loadavg::collect_loadavg(root).ok();
-        self.snapshot.uptime_s = crate::core::loadavg::collect_uptime(root).ok();
+        self.snapshot.load = tmog_core::loadavg::collect_loadavg(root).ok();
+        self.snapshot.uptime_s = tmog_core::loadavg::collect_uptime(root).ok();
 
         // ---- processes ----------------------------------------------
         if let Ok(pids) = read_pids(root) {
             let mut rows: Vec<Row> = Vec::with_capacity(pids.len());
             let total_delta = self.snapshot.cpu_ticks_delta;
             for pid in pids {
-                if let Ok(p) =
-                    crate::core::process::collect_one(root, pid, PAGE_BYTES, &self.passwd)
+                if let Ok(p) = tmog_core::process::collect_one(root, pid, PAGE_BYTES, &self.passwd)
                 {
                     // CPU% needs a previous sample of the same pid; the
                     // GUI keeps a pid map across ticks. v1 keeps the last
@@ -199,9 +198,8 @@ impl Sampler {
                         .iter()
                         .find(|r| r.proc.pid == pid)
                         .map(|r| &r.proc);
-                    let cpu_pct = prev.and_then(|pv| {
-                        crate::core::process_table::cpu_percent(pv, &p, total_delta)
-                    });
+                    let cpu_pct = prev
+                        .and_then(|pv| tmog_core::process_table::cpu_percent(pv, &p, total_delta));
                     rows.push(Row {
                         proc: p,
                         cpu: cpu_pct,
@@ -212,17 +210,17 @@ impl Sampler {
         }
 
         // ---- disks / nets -------------------------------------------
-        if let Ok(d) = crate::core::diskstats::collect(root) {
+        if let Ok(d) = tmog_core::diskstats::collect(root) {
             self.snapshot.disks = d;
         }
-        if let Ok(n) = crate::core::netdev::collect(root) {
+        if let Ok(n) = tmog_core::netdev::collect(root) {
             self.snapshot.nets = n;
         }
 
         // ---- hwmon --------------------------------------------------
-        let temps = crate::core::hwmon::collect(root);
+        let temps = tmog_core::hwmon::collect(root);
         if !temps.is_empty() {
-            self.snapshot.cpu_temp = crate::core::hwmon::select_cpu_temp(&temps).cloned();
+            self.snapshot.cpu_temp = tmog_core::hwmon::select_cpu_temp(&temps).cloned();
             self.snapshot.temps = temps;
         }
 
@@ -232,15 +230,15 @@ impl Sampler {
         }
 
         // ---- psi ----------------------------------------------------
-        self.snapshot.psi_memory = crate::core::pressure::collect_pressure(root, "memory")
+        self.snapshot.psi_memory = tmog_core::pressure::collect_pressure(root, "memory")
             .ok()
             .flatten();
-        self.snapshot.psi_io = crate::core::pressure::collect_pressure(root, "io")
+        self.snapshot.psi_io = tmog_core::pressure::collect_pressure(root, "io")
             .ok()
             .flatten();
 
         // ---- sysinfo (cheap enough per tick; could cache) -----------
-        self.snapshot.sysinfo = Some(crate::core::sysinfo::collect(root));
+        self.snapshot.sysinfo = Some(tmog_core::sysinfo::collect(root));
 
         // ---- histories ----------------------------------------------
         self.tick += 1;
@@ -273,8 +271,8 @@ impl Sampler {
         // disk rates (physical candidates only, matching the page filter)
         let mut disk_rates: RateHistory = Vec::new();
         for d in &self.snapshot.disks {
-            if !crate::core::diskstats::is_physical_candidate(&d.name)
-                || crate::core::diskstats::is_partition(root, &d.name)
+            if !tmog_core::diskstats::is_physical_candidate(&d.name)
+                || tmog_core::diskstats::is_partition(root, &d.name)
             {
                 continue;
             }
@@ -329,7 +327,7 @@ impl Sampler {
 }
 
 fn read_pids(root: &std::path::Path) -> Result<Vec<u32>, String> {
-    Ok(crate::core::process::list_pids(root))
+    Ok(tmog_core::process::list_pids(root))
 }
 
 /// sysconf(_SC_PAGESIZE) is 4096 everywhere Linux runs 64-bit today; a

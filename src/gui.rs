@@ -6,9 +6,9 @@ pub mod pages;
 pub mod proc_table;
 
 use crate::bg::SamplerHandle;
-use crate::core::settings::Settings;
 use eframe::egui;
 use std::sync::Arc;
+use tmog_core::settings::Settings;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Page {
@@ -36,13 +36,15 @@ pub struct App {
     applied_theme: Option<String>,
     /// system tray (None on sessions without tray support)
     tray: Option<crate::traythread::TrayHandle>,
+    /// settings dialog visibility (gear button in the sidebar footer)
+    show_settings: bool,
     timer_started: bool,
 }
 
 impl App {
     pub fn new() -> Self {
         // user-configurable cadence (Phase 4 settings dialog; TOML today)
-        let settings = match crate::core::settings::load(&crate::core::settings::default_path()) {
+        let settings = match tmog_core::settings::load(&tmog_core::settings::default_path()) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("settings: {e} (using defaults)");
@@ -61,6 +63,7 @@ impl App {
             persisted: false,
             applied_theme: None,
             tray: None,
+            show_settings: false,
             timer_started: false,
         }
     }
@@ -93,8 +96,8 @@ impl App {
                 crate::icons::TrayEvent::SetRefresh(ms) => {
                     self.sampler.set_refresh_ms(ms);
                     self.settings.refresh_ms = ms;
-                    if let Err(e) = crate::core::settings::save(
-                        &crate::core::settings::default_path(),
+                    if let Err(e) = tmog_core::settings::save(
+                        &tmog_core::settings::default_path(),
                         &self.settings,
                     ) {
                         eprintln!("settings save: {e}");
@@ -121,6 +124,7 @@ impl App {
             persisted: false,
             applied_theme: None,
             tray: None,
+            show_settings: false,
             timer_started: false,
         }
     }
@@ -207,12 +211,98 @@ impl eframe::App for App {
                         self.page = p;
                     }
                 }
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.separator();
+                    if ui.button("⚙  Settings").clicked() {
+                        self.show_settings = !self.show_settings;
+                    }
+                });
             });
+
+        // settings dialog (before central so clicks land on top)
+        if self.show_settings {
+            let mut persist_now = false;
+            let mut open = self.show_settings;
+            egui::Window::new("Settings")
+                .open(&mut open)
+                .id(egui::Id::new("rstmog-settings"))
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Theme").strong());
+                    let mut theme = self.settings.theme.clone();
+                    egui::ComboBox::from_id_salt("theme_combo")
+                        .selected_text(theme.clone())
+                        .show_ui(ui, |ui| {
+                            for t in ["dark", "green", "amber", "blue", "mono", "light"] {
+                                ui.selectable_value(&mut theme, t.to_string(), t);
+                            }
+                        });
+                    if theme != self.settings.theme {
+                        self.settings.theme = theme;
+                        // re-apply immediately (update() re-sets visuals when
+                        // the applied theme differs)
+                        persist_now = true;
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Poll rate").strong());
+                    let mut rate = self.settings.refresh_ms;
+                    for ms in [500u32, 1000, 2000] {
+                        if ui.radio_value(&mut rate, ms, format!("{ms} ms")).clicked() {
+                            self.settings.refresh_ms = rate;
+                            self.sampler.set_refresh_ms(rate);
+                            if let Some(tray) = &self.tray {
+                                tray.set_refresh(rate);
+                            }
+                            persist_now = true;
+                        }
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Processes").strong());
+                    let mut tree = self.settings.proc_tree;
+                    if ui
+                        .checkbox(&mut tree, "Tree view by default")
+                        .on_hover_text("Initial state of the Processes page tree toggle")
+                        .changed()
+                    {
+                        self.settings.proc_tree = tree;
+                        self.proc_state.tree = tree;
+                        persist_now = true;
+                    }
+                    let mut follow = self.settings.proc_follow;
+                    if ui
+                        .checkbox(&mut follow, "Follow selection by default")
+                        .changed()
+                    {
+                        self.settings.proc_follow = follow;
+                        self.proc_state.follow = follow;
+                        persist_now = true;
+                    }
+                    ui.separator();
+                    if ui.button("Save now").clicked() {
+                        persist_now = true;
+                    }
+                    if persist_now
+                        && let Err(e) = tmog_core::settings::save(
+                            &tmog_core::settings::default_path(),
+                            &self.settings,
+                        )
+                    {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 120, 120),
+                            format!("save failed: {e}"),
+                        );
+                    }
+                });
+            self.show_settings = open;
+        }
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if let Some(up) = snap.uptime_s {
-                    ui.label(format!("up {}", crate::core::sysinfo::format_uptime(up)));
+                    ui.label(format!("up {}", tmog_core::sysinfo::format_uptime(up)));
                 }
                 ui.separator();
                 if let Some(l) = snap.load {
@@ -247,7 +337,7 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) && !self.persisted {
             self.proc_state.persist_into(&mut self.settings);
             if let Err(e) =
-                crate::core::settings::save(&crate::core::settings::default_path(), &self.settings)
+                tmog_core::settings::save(&tmog_core::settings::default_path(), &self.settings)
             {
                 eprintln!("settings save: {e}");
             }
@@ -261,8 +351,8 @@ impl App {
     /// (SIGTERM→wait→SIGKILL) — acceptable here because it's user-
     /// initiated and short-lived; heavy work would move to a thread.
     fn run_proc_action(&mut self, a: proc_table::ProcAction) {
-        use crate::core::actions;
         use std::time::Duration;
+        use tmog_core::actions;
         let res = match &a {
             proc_table::ProcAction::EndTask(pid) => {
                 actions::end_task(*pid as i32, Duration::from_secs(3))

@@ -261,10 +261,10 @@ pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
         .spacing([18.0, 4.0])
         .show(ui, |ui| {
             for d in &s.disks {
-                if !crate::core::diskstats::is_physical_candidate(&d.name) {
+                if !tmog_core::diskstats::is_physical_candidate(&d.name) {
                     continue;
                 }
-                let id = crate::core::diskstats::read_identity(std::path::Path::new("/"), &d.name);
+                let id = tmog_core::diskstats::read_identity(std::path::Path::new("/"), &d.name);
                 ui.label(d.name.clone());
                 ui.label(id.model.unwrap_or("-".into()));
                 ui.label(format!(
@@ -300,7 +300,7 @@ pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 if n.name == "lo" {
                     continue;
                 }
-                let id = crate::core::netdev::read_identity(std::path::Path::new("/"), &n.name);
+                let id = tmog_core::netdev::read_identity(std::path::Path::new("/"), &n.name);
                 ui.label(n.name.clone());
                 ui.label(format!("{:?}", id.kind(std::path::Path::new("/"))));
                 ui.label(format!("rx {} MB", n.rx_bytes / 1_000_000));
@@ -344,19 +344,19 @@ pub fn thermals_ui(ui: &mut egui::Ui, s: &Snapshot) {
                     last_chip = &r.chip;
                 }
                 match r.kind {
-                    crate::core::hwmon::SensorKind::Temp => {
+                    tmog_core::hwmon::SensorKind::Temp => {
                         ui.label(&r.label);
                         ui.label(format!("{:.1} °C", r.value));
                     }
-                    crate::core::hwmon::SensorKind::Fan => {
+                    tmog_core::hwmon::SensorKind::Fan => {
                         ui.label(&r.label);
                         ui.label(format!("{:.0} RPM", r.value));
                     }
-                    crate::core::hwmon::SensorKind::Voltage => {
+                    tmog_core::hwmon::SensorKind::Voltage => {
                         ui.label(&r.label);
                         ui.label(format!("{:.0} mV", r.value));
                     }
-                    crate::core::hwmon::SensorKind::Other => continue,
+                    tmog_core::hwmon::SensorKind::Other => continue,
                 }
                 ui.end_row();
             }
@@ -388,7 +388,7 @@ pub fn system_ui(ui: &mut egui::Ui, s: &Snapshot) {
             });
     }
     // cpu model from cpuinfo live
-    if let Ok(ci) = crate::core::cpuinfo::collect(std::path::Path::new("/")) {
+    if let Ok(ci) = tmog_core::cpuinfo::collect(std::path::Path::new("/")) {
         ui.label(format!(
             "{} ({} logical, {} cores)",
             ci.model, ci.logical, ci.cores

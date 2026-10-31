@@ -110,8 +110,10 @@ into `--self-test`; hardware-dependent ones warn, never fail)
       round-trip tests; unknown keys preserved (merge into existing table,
       atomic temp+rename write); corrupt file = Err (GUI falls back with a
       warning, never silently discards); serde(default) partial files
-- [ ] Split workspace: `crates/tmog-core` (lib, zero GUI deps) +
-      `crates/rstmog` (bin)
+- [x] Split workspace: `crates/tmog-core` (lib, zero GUI deps — nvml/
+      serde/toml/dirs only) + `rstmog` (bin: egui frontend, sampler, tray,
+      CLI). Fixture tree moved with the tests to crates/tmog-core/tests/.
+      100 tests total (92 core + 8 bin), all green
 
 ## Phase 2.5 — Sampler + v1 GUI shell (landed ahead of full Phase 4)
 
@@ -200,9 +202,13 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       driver tracks the shared `AtomicU32` refresh handle so a runtime
       cadence change takes effect within ~100 ms. `set_refresh_ms`
       clamps to 250..5000 (settings-dialog hook).
-- [ ] Settings dialog lets the user change the poll rate at runtime
-      (Phase 4 dialog item; persisted via core/settings — the runtime
-      plumbing `set_refresh_ms` is now in place)
+- [x] Settings dialog (⚙ button in the sidebar): theme picker
+      (dark/green/amber/blue/mono/light, applied live), poll-rate radio
+      ladder 500/1000/2000 (reprograms the sampler thread + tray ticks +
+      repaint cadence), Processes defaults (tree/follow, synced to the
+      live table state); changes save to TOML immediately with an inline
+      error row on failure. Also closes the gap for tray-driven rate
+      persistence
 - [ ] Medium tier: process ROWS every 3rd tick; CPU% deltas computed
       against the last real sample so they stay honest between.
 - [ ] Slow tier: status/statm/cmdline only for visible rows +
@@ -245,7 +251,7 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
 - [ ] System page: hostname/distro/kernel/CPU/mem/boot/uptime/load
 - [ ] Themes: Dark default + phosphor Green/Amber/Blue + Mono + Light
       (egui Visuals generated from a Theme struct); persisted
-- [ ] Settings dialog + persistence of theme/refresh/sort/tree/follow
+- [x] Settings dialog + persistence of theme/refresh/tree/follow (sort persists on window close)
 
 ## Phase 5 — Fit & finish
 

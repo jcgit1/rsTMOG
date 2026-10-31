@@ -1,10 +1,8 @@
-//! rsTMOG — Task Manager OG, rewritten in Rust.
+//! rsTMOG — Task Manager OG, rewritten in Rust (bin crate).
 //!
-//! `core` is the metrics engine (procfs/sysfs/NVML); `gui` is the egui
-//! frontend. Kept as modules of one crate for now; split into a workspace
-//! (core lib + gui bin) once the core API settles.
-
-pub mod core;
+//! The metrics engine lives in the `tmog-core` workspace crate (procfs/
+//! sysfs/NVML, zero GUI deps); this crate is the egui frontend, sampler,
+//! tray/icons and CLI entry points.
 
 mod bg;
 mod gui;
@@ -31,8 +29,10 @@ fn detail(text: &str) {
 
 /// Parse every cpu row of a `/proc/stat` text. Returns aggregate ("cpu")
 /// first then per-core rows, in file order.
-fn cpu_rows(text: &str) -> Vec<core::cpu::CpuJiffies> {
-    text.lines().filter_map(core::cpu::parse_cpu_line).collect()
+fn cpu_rows(text: &str) -> Vec<tmog_core::cpu::CpuJiffies> {
+    text.lines()
+        .filter_map(tmog_core::cpu::parse_cpu_line)
+        .collect()
 }
 
 fn print_version() {
@@ -55,7 +55,7 @@ fn self_test() -> i32 {
     check(
         "cpu: /proc/stat parses",
         (|| {
-            let text = core::fs::read_to_string(Path::new("/proc/stat"))
+            let text = tmog_core::fs::read_to_string(Path::new("/proc/stat"))
                 .map_err(|e| format!("read /proc/stat: {e}"))?;
             let rows = cpu_rows(&text);
             if rows.is_empty() {
@@ -74,7 +74,7 @@ fn self_test() -> i32 {
     check(
         "meminfo parses",
         (|| {
-            let m = core::meminfo::collect(Path::new("/"))?;
+            let m = tmog_core::meminfo::collect(Path::new("/"))?;
             if m.mem_total == 0 {
                 return Err("MemTotal parsed as 0".into());
             }
@@ -99,8 +99,8 @@ fn self_test() -> i32 {
     check(
         "loadavg+uptime parse",
         (|| {
-            let l = core::loadavg::collect_loadavg(Path::new("/"))?;
-            let up = core::loadavg::collect_uptime(Path::new("/"))?;
+            let l = tmog_core::loadavg::collect_loadavg(Path::new("/"))?;
+            let up = tmog_core::loadavg::collect_uptime(Path::new("/"))?;
             if up <= 0.0 {
                 return Err(format!("uptime {up} <= 0"));
             }
@@ -118,12 +118,12 @@ fn self_test() -> i32 {
     check(
         "cpuinfo + cpufreq",
         (|| {
-            let i = core::cpuinfo::collect(Path::new("/"))?;
-            let cpus = core::cpuinfo::present_cpus(Path::new("/"));
+            let i = tmog_core::cpuinfo::collect(Path::new("/"))?;
+            let cpus = tmog_core::cpuinfo::present_cpus(Path::new("/"));
             if cpus.is_empty() {
                 return Err("no cpus found under /sys/devices/system/cpu".into());
             }
-            let c0 = core::cpuinfo::read_cpufreq(Path::new("/"), cpus[0]);
+            let c0 = tmog_core::cpuinfo::read_cpufreq(Path::new("/"), cpus[0]);
             detail(&format!(
                 "{} ({} logical, {} cores, {} socket(s)); cpu0 {} governor={:?} driver={:?}",
                 i.model,
@@ -142,7 +142,7 @@ fn self_test() -> i32 {
 
     // PSI: warn-only when the kernel does not expose it.
     for res in ["cpu", "memory", "io"] {
-        match core::pressure::collect_pressure(Path::new("/"), res) {
+        match tmog_core::pressure::collect_pressure(Path::new("/"), res) {
             Ok(Some((s, _))) => {
                 check(&format!("psi {res}"), Ok(()));
                 detail(&format!("some avg10={:.2} avg60={:.2}", s.avg10, s.avg60));
@@ -155,9 +155,9 @@ fn self_test() -> i32 {
     check(
         "vmstat parses",
         (|| {
-            let t = core::fs::read_under(Path::new("/"), "proc/vmstat")
+            let t = tmog_core::fs::read_under(Path::new("/"), "proc/vmstat")
                 .map_err(|e| format!("read vmstat: {e}"))?;
-            let m = core::pressure::parse_vmstat(&t);
+            let m = tmog_core::pressure::parse_vmstat(&t);
             if m.is_empty() {
                 return Err("vmstat parsed empty".into());
             }
@@ -174,18 +174,19 @@ fn self_test() -> i32 {
         "process enumeration",
         (|| {
             let passwd = std::fs::read_to_string("/etc/passwd")
-                .map(|s| core::process::parse_passwd(&s))
+                .map(|s| tmog_core::process::parse_passwd(&s))
                 .unwrap_or_default();
-            let pids = core::process::list_pids(Path::new("/"));
+            let pids = tmog_core::process::list_pids(Path::new("/"));
             if pids.is_empty() {
                 return Err("no pids under /proc".into());
             }
             // collect every readable process; unreadable ones (exited,
             // permission) are tolerated like the C++ reference does.
             let mut ok = 0usize;
-            let mut me: Option<core::process::Proc> = None;
+            let mut me: Option<tmog_core::process::Proc> = None;
             for pid in &pids {
-                if let Ok(p) = core::process::collect_one(Path::new("/"), *pid, 4096, &passwd) {
+                if let Ok(p) = tmog_core::process::collect_one(Path::new("/"), *pid, 4096, &passwd)
+                {
                     ok += 1;
                     if std::process::id() == *pid {
                         me = Some(p);
@@ -212,16 +213,16 @@ fn self_test() -> i32 {
     check(
         "diskstats parses",
         (|| {
-            let d = core::diskstats::collect(Path::new("/"))?;
+            let d = tmog_core::diskstats::collect(Path::new("/"))?;
             let phys: Vec<_> = d
                 .iter()
-                .filter(|c| core::diskstats::is_physical_candidate(&c.name))
-                .filter(|c| !core::diskstats::is_partition(Path::new("/"), &c.name))
+                .filter(|c| tmog_core::diskstats::is_physical_candidate(&c.name))
+                .filter(|c| !tmog_core::diskstats::is_partition(Path::new("/"), &c.name))
                 .collect();
             if phys.is_empty() {
                 return Err("no physical disks found".into());
             }
-            let id = core::diskstats::read_identity(Path::new("/"), &phys[0].name);
+            let id = tmog_core::diskstats::read_identity(Path::new("/"), &phys[0].name);
             detail(&format!(
                 "{} devices, {} physical candidates (first: {} {:?} rot={:?})",
                 d.len(),
@@ -237,23 +238,23 @@ fn self_test() -> i32 {
     check(
         "netdev + identity",
         (|| {
-            let rows = core::netdev::collect(Path::new("/"))?;
+            let rows = tmog_core::netdev::collect(Path::new("/"))?;
             if rows.is_empty() {
                 return Err("no net/dev rows".into());
             }
             let mut desc = Vec::new();
             for r in rows.iter().take(4) {
-                let id = core::netdev::read_identity(Path::new("/"), &r.name);
+                let id = tmog_core::netdev::read_identity(Path::new("/"), &r.name);
                 let kind = id.kind(Path::new("/"));
                 desc.push(format!(
                     "{}:{}{}",
                     r.name,
                     match kind {
-                        core::netdev::NetKind::Loopback => "lo",
-                        core::netdev::NetKind::Wifi => "wifi",
-                        core::netdev::NetKind::Wired => "wired",
-                        core::netdev::NetKind::Virtual => "virt",
-                        core::netdev::NetKind::Other => "other",
+                        tmog_core::netdev::NetKind::Loopback => "lo",
+                        tmog_core::netdev::NetKind::Wifi => "wifi",
+                        tmog_core::netdev::NetKind::Wired => "wired",
+                        tmog_core::netdev::NetKind::Virtual => "virt",
+                        tmog_core::netdev::NetKind::Other => "other",
                     },
                     id.speed_mbps
                         .map(|s| format!(" {s}Mbps"))
@@ -267,10 +268,10 @@ fn self_test() -> i32 {
 
     // Hardware-dependent collectors: warn, never fail (per PLAN).
     {
-        match core::hwmon::collect(Path::new("/")) {
+        match tmog_core::hwmon::collect(Path::new("/")) {
             readings if readings.is_empty() => line("warn  hwmon: no sensors readable"),
             readings => {
-                let headline = core::hwmon::select_cpu_temp(&readings);
+                let headline = tmog_core::hwmon::select_cpu_temp(&readings);
                 check("hwmon + cpu headline", Ok(()));
                 detail(&format!(
                     "{} sensors; headline = {}",
@@ -281,11 +282,11 @@ fn self_test() -> i32 {
                 ));
             }
         }
-        match core::rapl::read_package_energy(Path::new("/")) {
+        match tmog_core::rapl::read_package_energy(Path::new("/")) {
             Ok((e, m)) => detail(&format!("RAPL package energy_uj={e} max={m}")),
             Err(_) => line("warn  rapl: no package domain (unprivileged or unsupported)"),
         }
-        match core::rapl::collect_battery(Path::new("/")) {
+        match tmog_core::rapl::collect_battery(Path::new("/")) {
             Some(b) => detail(&format!(
                 "battery {}% {:?}",
                 b.percent.unwrap_or(0.0),
@@ -293,15 +294,15 @@ fn self_test() -> i32 {
             )),
             None => line("warn  battery: none present"),
         }
-        match core::zfs::collect(Path::new("/")) {
+        match tmog_core::zfs::collect(Path::new("/")) {
             Some(a) => detail(&format!(
                 "zfs arc {:.1} GiB (reclaimable {:.1} GiB)",
                 a.size as f64 / (1u64 << 30) as f64,
-                core::zfs::reclaimable(&a) as f64 / (1u64 << 30) as f64
+                tmog_core::zfs::reclaimable(&a) as f64 / (1u64 << 30) as f64
             )),
             None => line("warn  zfs: no arcstats (module not loaded on this box)"),
         }
-        let si = core::sysinfo::collect(Path::new("/"));
+        let si = tmog_core::sysinfo::collect(Path::new("/"));
         check("sysinfo", Ok(()));
         detail(&format!(
             "{} / {} {} / {}",
@@ -309,7 +310,7 @@ fn self_test() -> i32 {
         ));
     }
 
-    match core::gpu::Nvml::new() {
+    match tmog_core::gpu::Nvml::new() {
         Some(n) => {
             let gpus = n.sample_all();
             check("gpu (NVML)", Ok(()));
@@ -349,7 +350,7 @@ fn snapshot() -> i32 {
     use std::thread::sleep;
     use std::time::Duration;
 
-    let text1 = match core::fs::read_to_string(Path::new("/proc/stat")) {
+    let text1 = match tmog_core::fs::read_to_string(Path::new("/proc/stat")) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("cannot read /proc/stat: {e}");
@@ -357,7 +358,7 @@ fn snapshot() -> i32 {
         }
     };
     sleep(Duration::from_millis(200));
-    let text2 = match core::fs::read_to_string(Path::new("/proc/stat")) {
+    let text2 = match tmog_core::fs::read_to_string(Path::new("/proc/stat")) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("cannot read /proc/stat: {e}");
@@ -368,7 +369,7 @@ fn snapshot() -> i32 {
     let now = cpu_rows(&text2);
     line("rstmog snapshot (200ms window)");
     for (p, n) in prev.iter().zip(now.iter()) {
-        match core::cpu::busy_percent(p, n) {
+        match tmog_core::cpu::busy_percent(p, n) {
             Some(pct) => line(&format!("{:<6} {:5.1}%", n.name, pct)),
             None => line(&format!("{:<6}  (no data)", n.name)),
         }

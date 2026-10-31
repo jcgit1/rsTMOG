@@ -3,9 +3,9 @@
 //! and a right-click context menu. State lives in `ProcTableState`, which
 //! `App` owns across frames; the rows come from the immutable snapshot.
 
-use crate::core::process_table::{self, Row, SortDir, SortKey, TreeRow};
 use crate::sampler::Snapshot;
 use eframe::egui;
+use tmog_core::process_table::{self, Row, SortDir, SortKey, TreeRow};
 
 /// What the context menu can do to a row (the GUI never calls the kernel
 /// directly — it emits intents that `App` executes via core::actions).
@@ -34,7 +34,7 @@ pub struct ProcTableState {
 
 impl ProcTableState {
     /// Load persisted defaults (sort/tree/follow from settings).
-    pub fn from_settings(s: &crate::core::settings::Settings) -> Self {
+    pub fn from_settings(s: &tmog_core::settings::Settings) -> Self {
         let sort = match s.proc_sort.as_str() {
             "pid" => SortKey::Pid,
             "name" => SortKey::Name,
@@ -56,7 +56,7 @@ impl ProcTableState {
         }
     }
 
-    pub fn persist_into(&self, s: &mut crate::core::settings::Settings) {
+    pub fn persist_into(&self, s: &mut tmog_core::settings::Settings) {
         s.proc_sort = match self.sort {
             SortKey::Pid => "pid",
             SortKey::Name => "name",
