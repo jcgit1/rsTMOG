@@ -7,6 +7,8 @@
 pub mod core;
 
 mod gui;
+mod headless;
+mod sampler;
 
 use std::path::Path;
 
@@ -376,6 +378,32 @@ fn main() -> anyhow::Result<()> {
     match args.next().as_deref() {
         Some("--version") => print_version(),
         Some("--self-test") => std::process::exit(self_test()),
+        Some("--capture") => {
+            let page = match args.next().as_deref() {
+                None | Some("summary") => gui::Page::Summary,
+                Some("cpu") => gui::Page::Cpu,
+                Some("memory") => gui::Page::Memory,
+                Some("disks") => gui::Page::Disks,
+                Some("network") => gui::Page::Network,
+                Some("thermals") => gui::Page::Thermals,
+                Some("processes") => gui::Page::Processes,
+                Some("system") => gui::Page::System,
+                Some(other) => {
+                    eprintln!("unknown page: {other}");
+                    std::process::exit(2);
+                }
+            };
+            let out = args
+                .next()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/rstmog-capture.png"));
+            let mut app = gui::App::new();
+            // two ticks so deltas exist between samples
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            app.sampler.tick();
+            headless::capture(&mut app, page, &out)?;
+            println!("captured {page:?} -> {}", out.display());
+        }
         Some("--snapshot") => std::process::exit(snapshot()),
         Some("--") | None => gui::run()?,
         Some(other) => {

@@ -113,6 +113,24 @@ into `--self-test`; hardware-dependent ones warn, never fail)
 - [ ] Split workspace: `crates/tmog-core` (lib, zero GUI deps) +
       `crates/rstmog` (bin)
 
+## Phase 2.5 — Sampler + v1 GUI shell (landed ahead of full Phase 4)
+
+- [x] `sampler.rs` — owns all live state; one `tick()` pass per refresh;
+      `Snapshot` is the immutable read model pages consume (cpu agg/per
+      core, mem raw + ARC-adjusted, procs w/ CPU% deltas, disks, nets,
+      temps + CPU headline, GPU, PSI, sysinfo). Unreadable collectors keep
+      their previous value (tick never fails)
+- [x] `gui.rs` — egui shell: sidebar nav (8 pages), page stack, status
+      footer (uptime/load/procs/GPU%/temp), repaint-driver thread on
+      refresh_ms. v1 pages in `gui/pages.rs` are live readouts (graphs
+      next); processes page shows top-30 by CPU
+- [x] `headless.rs` — `rstmog --capture [page] [out.png]`: runs the real
+      page code through `egui::Context::run` + `tessellate`, then
+      rasterizes meshes in software implementing the egui_glow shader
+      contract (frag = vertex×texel, premultiplied, composited over
+      opaque). Zero GPU/window needed — review + CI screenshots work
+      headless. PNG writer is dependency-free (stored deflate blocks)
+
 ## Phase 3 — Actions (test against spawned child processes)
 
 - [ ] `core/actions.rs`: signal primitives; reject pid ≤ 0 (kill(0)/
