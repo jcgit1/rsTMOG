@@ -5,37 +5,75 @@ Task Manager OG, rewritten in Rust. Linux-only by design.
 A from-scratch Rust reimplementation of the TMOG concept (Dave Plummer's
 Task Manager OG), inspired by the behavioral design of
 [evildojo-tmog](https://github.com/mikedesu/evildojo-tmog) (MIT, Michael
-Bell), which remains available locally as a read-only reference at
-`~/repos/evildojo-tmog`. No C++ code is ported line-by-line; the Rust
-core is written idiomatically.
+Bell). No C++ code is ported line-by-line; the Rust is written idiomatically.
 
-## Layout (planned)
+![Summary page](docs/capture-summary.png)
 
-- `src/core/` — metrics collectors over `/proc`, `/sys`, NVML (pure parsers, unit-tested against fixtures, no GUI deps)
-- `src/gui/` — egui/eframe frontend (Summary, CPU, Memory, Disks, Network, Thermals, Processes, System pages)
-- `tests/fixtures/` — captured procfs trees for collector tests
+## What you get
+
+- **Eight pages**: Summary (live CPU/temperature trend graphs + readouts),
+  CPU (aggregate history graph, per-core bars, topology + freq/governor),
+  Memory (used% graph, ARC-aware stacked composition bar, PSI), Disks
+  (per-device read/write rate graphs + identity), Network (per-iface
+  rx/tx graphs, totals, speed/MAC), Thermals (CPU trend + grouped hwmon
+  sensors), Processes (sortable/filterable table, tree view, follow mode,
+  right-click End/Force-kill/Suspend/priority/Copy-cmdline), System.
+- **ZFS ARC-aware memory accounting** (the btop view): reclaimable ARC
+  folds back into available so a big ARC doesn't fake a full machine.
+- **NVIDIA GPU** via NVML (dlopen'd — no build-time driver dependency).
+- **Six themes** (dark + green/amber/blue phosphor + mono + light), live
+  switching, persisted — with theme-aware window and tray icons.
+- **System tray**: Open / poll-rate (500/1000/2000 ms) / Quit.
+- **Settings dialog**: theme, poll rate, process-table defaults; saved to
+  TOML immediately.
+- **Headless mode**: `rstmog --capture <page> out.png` renders any page
+  through the real egui pipeline with a software rasterizer — no GPU or
+  window server needed. `--smoke` runs it across all pages as a CI gate.
+
+## Layout
+
+```
+crates/tmog-core/   metrics library: /proc + /sys + NVML collectors,
+                    pure parsers, fixture-tested, zero GUI deps
+src/                rstmog bin: egui frontend (gui/, graph widget,
+                    processes table), sampler (+ background thread),
+                    tray/icons, headless capture, CLI
+assets/icons/       app icons (dark/light, 16-1024 px + SVG)
+packaging/          .desktop entry + installer for KDE/GNOME menus
+docs/               headless-rendered page screenshots
+```
 
 ## Building
 
 ```sh
-cargo build          # debug
-cargo run            # GUI
-cargo nextest run    # test suite
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo build            # debug
+cargo run              # GUI
+cargo test --workspace # 100 tests, no root, no live-proc deps
+bash scripts/ci.sh     # fmt + clippy + tests + self-test + smoke + deny
 ```
 
-Requires a working Rust stable toolchain (`rustup`). GPU support dlopens
-`libnvidia-ml.so` at runtime — no build-time NVIDIA dependency.
+Requires Rust stable and (Linux) GTK 3 + libappindicator **only for the
+system tray** — the app runs fine without a usable tray (degrades to no
+tray). Desktop launcher:
 
-## Remotes
+```sh
+cargo build --release
+BINDIR=$PWD/target/release bash packaging/install-desktop.sh
+```
 
-- `origin` — Forgejo: https://www.lm9llm.com/github/jcain/rsTMOG (private)
-- `github` — https://github.com/jcgit1/rsTMOG (private)
+## CLI
 
-Push both: `git push origin main && git push github main`
+```
+rstmog                     GUI
+rstmog --self-test         live sanity pass over every collector
+rstmog --snapshot          one-shot terminal dashboard
+rstmog --capture <page> <out.png>   headless page render (no GPU/X)
+rstmog --smoke             render every page headless; non-zero on failure
+rstmog --version
+```
 
 ## License
 
-MIT. "Task Manager OG"/TMOG is Dave Plummer's product; this project is
-not affiliated with or endorsed by him.
+MIT — see [LICENSE](LICENSE). "Task Manager OG"/TMOG is Dave Plummer's
+product; this project is not affiliated with or endorsed by him, and no
+upstream code or assets are included.

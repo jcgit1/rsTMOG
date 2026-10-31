@@ -275,8 +275,12 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       advisories today are all transitive (zvariant/glib etc., flagged
       unmaintained/unsound, none in a path we rely on for security);
       none are deny-level yet. Ran end-to-end: CI PASSED
-- [ ] README rewrite (build, screenshots, desktop entry); LICENSE (MIT)
-- [ ] Packaging pass on this box: release build, `.desktop` entry
+- [x] README rewritten (feature list, workspace layout, build/CI/CLI,
+      desktop entry, headless capture); LICENSE (MIT, with the TMOG
+      non-affiliation + evildojo attribution note)
+- [ ] Packaging pass on this box: release build (running now), `.desktop`
+      entry — done for the debug build and installed for this user;
+      re-run install-desktop.sh after the release build completes
 
 ## Deliberate non-goals (v1)
 
