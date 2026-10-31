@@ -309,8 +309,8 @@ impl Sampler {
         // Measured cost ~29 ms: it walks every hwmon chip and probes
         // every *_label/_input file. Temperatures move on a seconds
         // scale, so a 3-tick window loses nothing visible.
-        self.last_hwmon = self.tick.wrapping_add(1).is_multiple_of(row_every())
-            || self.snapshot.temps.is_empty();
+        self.last_hwmon =
+            self.tick.wrapping_add(1).is_multiple_of(row_every()) || self.snapshot.temps.is_empty();
         if self.last_hwmon {
             let temps = tmog_core::hwmon::collect(root);
             if !temps.is_empty() {
