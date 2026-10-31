@@ -110,6 +110,31 @@ fn self_test() -> i32 {
         })(),
     );
 
+    check(
+        "cpuinfo + cpufreq",
+        (|| {
+            let i = core::cpuinfo::collect(Path::new("/"))?;
+            let cpus = core::cpuinfo::present_cpus(Path::new("/"));
+            if cpus.is_empty() {
+                return Err("no cpus found under /sys/devices/system/cpu".into());
+            }
+            let c0 = core::cpuinfo::read_cpufreq(Path::new("/"), cpus[0]);
+            detail(&format!(
+                "{} ({} logical, {} cores, {} socket(s)); cpu0 {} governor={:?} driver={:?}",
+                i.model,
+                i.logical,
+                i.cores,
+                i.sockets,
+                c0.cur_khz
+                    .map(|k| format!("{:.0} MHz", k as f64 / 1000.0))
+                    .unwrap_or("-".into()),
+                c0.governor.as_deref().unwrap_or("-"),
+                c0.driver.as_deref().unwrap_or("-"),
+            ));
+            Ok(())
+        })(),
+    );
+
     if failures == 0 {
         line("self-test PASSED");
         0

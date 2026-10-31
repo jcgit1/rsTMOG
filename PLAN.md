@@ -66,7 +66,7 @@ into `--self-test`; hardware-dependent ones warn, never fail)
 - [x] `core/meminfo.rs` — `/proc/meminfo` parse; used%; `MemAvailable`
       fallback (free+buffers+cached)
 - [x] `core/loadavg.rs`, `core/uptime.rs`
-- [ ] `core/cpuinfo.rs` — model, topology, cpufreq sysfs tree (fake root in
+- [x] `core/cpuinfo.rs` — model, topology, cpufreq sysfs tree (fake root in
       tests), governor/driver
 - [ ] `core/vmstat.rs` + `core/pressure.rs` (PSI some/full avg lines)
 - [ ] `core/process.rs` — `/proc/[pid]/stat` (comm with spaces/parens!),

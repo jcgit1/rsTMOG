@@ -5,6 +5,7 @@
 //! design, in idiomatic Rust).
 
 pub mod cpu;
+pub mod cpuinfo;
 pub mod fs;
 pub mod loadavg;
 pub mod meminfo;
