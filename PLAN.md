@@ -68,7 +68,9 @@ into `--self-test`; hardware-dependent ones warn, never fail)
 - [x] `core/loadavg.rs`, `core/uptime.rs`
 - [x] `core/cpuinfo.rs` — model, topology, cpufreq sysfs tree (fake root in
       tests), governor/driver
-- [ ] `core/vmstat.rs` + `core/pressure.rs` (PSI some/full avg lines)
+- [x] `core/vmstat.rs` + `core/pressure.rs` (PSI some/full avg lines)
+      — one module (`pressure.rs`): vmstat map + PSI parse/collect,
+      PSI absent → warn-only in self-test
 - [ ] `core/process.rs` — `/proc/[pid]/stat` (comm with spaces/parens!),
       status/statm/cmdline (NUL argv, empty cmdline → kernel thread),
       uid→user; fake proc-root end-to-end test

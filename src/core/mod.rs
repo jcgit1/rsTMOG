@@ -9,4 +9,5 @@ pub mod cpuinfo;
 pub mod fs;
 pub mod loadavg;
 pub mod meminfo;
+pub mod pressure;
 pub mod ring;

@@ -135,6 +135,36 @@ fn self_test() -> i32 {
         })(),
     );
 
+    // PSI: warn-only when the kernel does not expose it.
+    for res in ["cpu", "memory", "io"] {
+        match core::pressure::collect_pressure(Path::new("/"), res) {
+            Ok(Some((s, _))) => {
+                check(&format!("psi {res}"), Ok(()));
+                detail(&format!("some avg10={:.2} avg60={:.2}", s.avg10, s.avg60));
+            }
+            Ok(None) => line(&format!("warn  psi {res}: not exposed by kernel")),
+            Err(e) => check(&format!("psi {res}"), Err(e)),
+        }
+    }
+
+    check(
+        "vmstat parses",
+        (|| {
+            let t = core::fs::read_under(Path::new("/"), "proc/vmstat")
+                .map_err(|e| format!("read vmstat: {e}"))?;
+            let m = core::pressure::parse_vmstat(&t);
+            if m.is_empty() {
+                return Err("vmstat parsed empty".into());
+            }
+            detail(&format!(
+                "{} counters (pgfault={:?})",
+                m.len(),
+                m.get("pgfault")
+            ));
+            Ok(())
+        })(),
+    );
+
     if failures == 0 {
         line("self-test PASSED");
         0
