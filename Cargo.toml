@@ -1,0 +1,35 @@
+[package]
+name = "rstmog"
+version = "0.1.0"
+edition = "2024"
+description = "rsTMOG — Task Manager OG, rewritten in Rust (Linux)"
+license = "MIT"
+repository = "https://github.com/jcgit1/rsTMOG"
+
+[dependencies]
+# GUI: immediate-mode, no system GUI deps (pure-Rust winit + wgpu backend)
+egui = "0.33"
+# NOTE: eframe's "x11"/"wayland" features must be enabled explicitly — they are not in
+# the default set, and without them winit compiles with no platform backend at all.
+eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+# eframe pins wgpu with default-features=false (std only), so the native GPU backends
+# must be switched on here (vulkan for the RTX 3060, gles as fallback).
+wgpu = { version = "27", default-features = false, features = ["vulkan", "gles"] }
+
+# Metrics core
+procfs = "0.18"          # /proc + /sys collectors (cpu, mem, diskstats, net, processes)
+nvml-wrapper = { version = "0.11", features = ["legacy-functions"] }  # dlopens libnvidia-ml at runtime
+
+# Support
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+dirs = "6"
+
+[dev-dependencies]
+insta = "1"
+
+[profile.release]
+lto = "thin"
+strip = true
