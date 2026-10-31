@@ -133,7 +133,8 @@ into `--self-test`; hardware-dependent ones warn, never fail)
 
 ## Phase 3 — Actions (test against spawned child processes)
 
-- [ ] `core/actions.rs`: signal primitives; reject pid ≤ 0 (kill(0)/
+- [x] `core/actions.rs` (first entry above; the duplicate original
+      checkbox is superseded): signal primitives; reject pid ≤ 0 (kill(0)/
       kill(-1) are broadcast!) before anything reaches kill()
 - [x] `core/actions.rs` — signal primitives + `end_task` (SIGTERM→grace→
       SIGKILL) / force_kill / suspend / resume / get+set_nice, all via a
@@ -144,12 +145,12 @@ into `--self-test`; hardware-dependent ones warn, never fail)
       state T then resumes; renice raise works. The evildojo lesson is
       honored: set_nice reports whatever the kernel says, no EPERM
       assumption.
-- [ ] end_task: SIGTERM → bounded wait → SIGKILL (async, unlike C++
-      blocking version); force kill
-- [ ] suspend/resume (SIGSTOP/SIGCONT), verified via state polling
-- [ ] renice get/set — remember the evildojo lesson: lowering succeeds for
-      unprivileged callers within RLIMIT_NICE + own-nice floor; tests
-      predict, not assume EPERM
+- [x] end_task: SIGTERM → bounded wait → SIGKILL — DONE but *blocking*
+      (spec said async; async remains an open follow-up). Force kill done.
+- [x] suspend/resume (SIGSTOP/SIGCONT), verified via state polling
+- [x] renice get/set — evildojo lesson honored: no EPERM assumption, the
+      kernel verdict is reported via errno (lowering succeeds for
+      unprivileged callers within RLIMIT_NICE + own-nice floor)
 
 ## Phase 4.9 — Icons (user-supplied package, 2026-10-31)
 
