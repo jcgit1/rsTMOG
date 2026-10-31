@@ -74,8 +74,29 @@ pub struct Sampler {
     prev_disk_write: std::collections::HashMap<String, (u64, u64)>,
     prev_net_rx: std::collections::HashMap<String, (u64, u64)>,
     prev_net_tx: std::collections::HashMap<String, (u64, u64)>,
+    /// cumulative aggregate cpu ticks (USER_HZ) at the last row pass and
+    /// now, so the per-process CPU% denominator spans exactly the ticks
+    /// between ROW passes
+    agg_ticks: u64,
+    row_pass_ticks: u64,
+    last_was_row: bool,
+    last_hwmon: bool,
+    /// pids the GUI asked to have fully enriched (visible slice + selected)
+    detail_pids: Vec<u32>,
     pub snapshot: Snapshot,
 }
+
+/// Refresh process rows every Nth tick (medium tier). A/B testing hook:
+/// RSTMOG_ROW_EVERY=1 restores the always-full walk for comparisons.
+pub fn row_every() -> u64 {
+    match std::env::var("RSTMOG_ROW_EVERY").as_deref() {
+        Ok("1") => 1,
+        _ => 3,
+    }
+}
+
+/// Max pids enriched per tick (slow tier batch cap).
+const DETAIL_BATCH: usize = 25;
 
 impl Sampler {
     pub fn new() -> Self {
@@ -99,6 +120,11 @@ impl Sampler {
             prev_disk_write: Default::default(),
             prev_net_rx: Default::default(),
             prev_net_tx: Default::default(),
+            agg_ticks: 0,
+            row_pass_ticks: 0,
+            last_was_row: false,
+            last_hwmon: false,
+            detail_pids: Vec::new(),
             snapshot: Snapshot::default(),
         }
     }
@@ -130,6 +156,31 @@ impl Sampler {
         }
     }
 
+    /// The tick number of the last completed tick (bench).
+    pub fn tick_no(&self) -> u64 {
+        self.tick
+    }
+
+    /// Did the last completed tick refresh process rows? (bench/classify)
+    pub fn last_tick_was_row(&self) -> bool {
+        self.last_was_row
+    }
+
+    /// Did the last completed tick also refresh hwmon temps? (bench: the
+    /// hwmon tier runs ~29 ms and rides the same cadence as rows in name
+    /// only — the process block runs first and flips `last_was_row` late,
+    /// so benches must not infer hwmon work from `last_tick_was_row`.)
+    pub fn last_tick_had_hwmon(&self) -> bool {
+        self.last_hwmon
+    }
+
+    /// Ask the sampler to fully populate (rss/cmdline/user) these pids on
+    /// the next tick — the GUI calls this with the visible table slice
+    /// plus the selected pid (slow tier).
+    pub fn request_detail(&mut self, pids: &[u32]) {
+        self.detail_pids = pids.to_vec();
+    }
+
     /// One collection pass. Cheap and panic-tolerant: any collector that
     /// fails leaves its previous snapshot value in place.
     pub fn tick(&mut self) {
@@ -159,12 +210,19 @@ impl Sampler {
                 ) {
                     self.snapshot.cpu_ticks_delta = n.total().saturating_sub(p.total());
                 }
+                // cumulative aggregate ticks for the row-pass CPU% window
+                if let Some(n) = rows.iter().find(|r| r.name == "cpu") {
+                    self.agg_ticks = n.total();
+                }
             }
             self.prev_ticks = rows
                 .iter()
                 .find(|r| r.name == "cpu")
                 .map(|r| r.total())
                 .unwrap_or(0);
+            if self.row_pass_ticks == 0 {
+                self.row_pass_ticks = self.agg_ticks;
+            }
             self.prev_cpu = rows;
         }
 
@@ -182,31 +240,61 @@ impl Sampler {
         self.snapshot.load = tmog_core::loadavg::collect_loadavg(root).ok();
         self.snapshot.uptime_s = tmog_core::loadavg::collect_uptime(root).ok();
 
-        // ---- processes ----------------------------------------------
-        if let Ok(pids) = read_pids(root) {
-            let mut rows: Vec<Row> = Vec::with_capacity(pids.len());
-            let total_delta = self.snapshot.cpu_ticks_delta;
-            for pid in pids {
-                if let Ok(p) = tmog_core::process::collect_one(root, pid, PAGE_BYTES, &self.passwd)
-                {
-                    // CPU% needs a previous sample of the same pid; the
-                    // GUI keeps a pid map across ticks. v1 keeps the last
-                    // snapshot's rows for the delta.
-                    let prev = self
-                        .snapshot
-                        .procs
-                        .iter()
-                        .find(|r| r.proc.pid == pid)
-                        .map(|r| &r.proc);
-                    let cpu_pct = prev
-                        .and_then(|pv| tmog_core::process_table::cpu_percent(pv, &p, total_delta));
-                    rows.push(Row {
-                        proc: p,
-                        cpu: cpu_pct,
-                    });
+        // ---- processes (medium tier: every 3rd tick) -----------------
+        // The full walk dominates tick cost — ~100 ms of the ~140 ms
+        // worst case on this box (measured via the sampler). Rows
+        // refresh every ROW_EVERY-th tick; between refreshes the table
+        // keeps the previous rows. CPU% is computed against the LAST
+        // actual sample and the ticks accumulated since then, so the
+        // update reflects the whole interval, not one 100 ms slice.
+        self.last_was_row =
+            self.tick.wrapping_add(1).is_multiple_of(row_every()) || self.snapshot.procs.is_empty();
+        if self.last_was_row
+            && let Ok(pids) = read_pids(root)
+        {
+            {
+                let mut rows: Vec<Row> = Vec::with_capacity(pids.len());
+                for pid in pids {
+                    // cheap tier: stat only; status/statm/cmdline are
+                    // filled on demand for visible rows (slow tier below)
+                    if let Ok(mut p) = tmog_core::process::collect_stat_only(root, pid) {
+                        // carry enriched detail forward if the pid was
+                        // known last pass (cheap: no syscalls)
+                        if let Some(prev_full) =
+                            self.snapshot.procs.iter().find(|r| r.proc.pid == pid)
+                        {
+                            if p.rss_bytes == 0 {
+                                p.rss_bytes = prev_full.proc.rss_bytes;
+                            }
+                            if p.cmdline.is_empty() {
+                                p.cmdline = prev_full.proc.cmdline.clone();
+                            }
+                            if p.user.is_none() {
+                                p.user = prev_full.proc.user.clone();
+                            }
+                        }
+                        let prev = self
+                            .snapshot
+                            .procs
+                            .iter()
+                            .find(|r| r.proc.pid == pid)
+                            .map(|r| &r.proc);
+                        // aggregate ticks accumulated SINCE the previous
+                        // row pass (since_ticks covers all ticks, so use
+                        // it directly — it equals the row window)
+                        let total_delta = (self.agg_ticks - self.row_pass_ticks).max(1);
+                        let cpu_pct = prev.and_then(|pv| {
+                            tmog_core::process_table::cpu_percent(pv, &p, total_delta)
+                        });
+                        rows.push(Row {
+                            proc: p,
+                            cpu: cpu_pct,
+                        });
+                    }
                 }
+                self.snapshot.procs = rows;
+                self.row_pass_ticks = self.agg_ticks;
             }
-            self.snapshot.procs = rows;
         }
 
         // ---- disks / nets -------------------------------------------
@@ -217,14 +305,21 @@ impl Sampler {
             self.snapshot.nets = n;
         }
 
-        // ---- hwmon --------------------------------------------------
-        let temps = tmog_core::hwmon::collect(root);
-        if !temps.is_empty() {
-            self.snapshot.cpu_temp = tmog_core::hwmon::select_cpu_temp(&temps).cloned();
-            self.snapshot.temps = temps;
+        // ---- hwmon (medium tier: every 3rd tick) ----------------------
+        // Measured cost ~29 ms: it walks every hwmon chip and probes
+        // every *_label/_input file. Temperatures move on a seconds
+        // scale, so a 3-tick window loses nothing visible.
+        self.last_hwmon = self.tick.wrapping_add(1).is_multiple_of(row_every())
+            || self.snapshot.temps.is_empty();
+        if self.last_hwmon {
+            let temps = tmog_core::hwmon::collect(root);
+            if !temps.is_empty() {
+                self.snapshot.cpu_temp = tmog_core::hwmon::select_cpu_temp(&temps).cloned();
+                self.snapshot.temps = temps;
+            }
         }
 
-        // ---- gpu ----------------------------------------------------
+        // ---- gpu (light tier: every tick, but reuse one handle) ------
         if let Some(nvml) = &self.nvml {
             self.snapshot.gpu = nvml.sample(0);
         }
@@ -239,6 +334,30 @@ impl Sampler {
 
         // ---- sysinfo (cheap enough per tick; could cache) -----------
         self.snapshot.sysinfo = Some(tmog_core::sysinfo::collect(root));
+
+        // ---- slow tier: enrich the pids the GUI cares about ---------
+        // status/statm/cmdline only for the visible slice + selection.
+        // Batched: at most DETAIL_BATCH per tick so a burst of requests
+        // (fast scroll) never spikes a tick; a backlog is simply served
+        // over the next few ticks.
+        if !self.detail_pids.is_empty() {
+            let want = std::mem::take(&mut self.detail_pids);
+            for pid in want.iter().take(DETAIL_BATCH) {
+                if let Some(row) = self.snapshot.procs.iter_mut().find(|r| r.proc.pid == *pid) {
+                    tmog_core::process::enrich_one(
+                        root,
+                        *pid,
+                        PAGE_BYTES,
+                        &self.passwd,
+                        &mut row.proc,
+                    );
+                }
+            }
+            // anything beyond the batch goes back for next tick
+            if want.len() > DETAIL_BATCH {
+                self.detail_pids = want[DETAIL_BATCH..].to_vec();
+            }
+        }
 
         // ---- histories ----------------------------------------------
         self.tick += 1;

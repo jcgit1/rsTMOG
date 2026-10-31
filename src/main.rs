@@ -465,19 +465,100 @@ fn main() -> anyhow::Result<()> {
             s.tick();
             let mut worst = 0f64;
             let mut tot = 0f64;
+            let mut row_tot = 0f64;
+            let mut light_tot = 0f64;
+            let mut row_n = 0u64;
             for _ in 0..n {
                 let t0 = std::time::Instant::now();
                 s.tick();
                 let e = t0.elapsed().as_secs_f64() * 1000.0;
+                // classify AFTER the tick: last_tick_was_row() reflects
+                // the tick that just ran
+                let is_row = s.last_tick_was_row();
                 worst = worst.max(e);
                 tot += e;
+                if is_row {
+                    row_tot += e;
+                    row_n += 1;
+                } else {
+                    light_tot += e;
+                }
             }
             println!(
-                "ticks={n} avg={:.2}ms worst={:.2}ms procs={}",
+                "ticks={n} avg={:.2}ms worst={:.2}ms | row-ticks n={row_n} avg={:.2}ms | light-ticks avg={:.2}ms | procs={}",
                 tot / n as f64,
                 worst,
+                if row_n > 0 {
+                    row_tot / row_n as f64
+                } else {
+                    0.0
+                },
+                if n - row_n > 0 {
+                    light_tot / (n - row_n) as f64
+                } else {
+                    0.0
+                },
                 s.snapshot.procs.len()
             );
+        }
+        Some("--bench-phases") => {
+            // per-collector cost breakdown on the live system
+            let root = std::path::Path::new("/");
+            macro_rules! time_it {
+                ($name:expr, $body:expr) => {{
+                    let mut best = f64::MAX;
+                    for _ in 0..5 {
+                        let t = std::time::Instant::now();
+                        let _ = $body;
+                        best = best.min(t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    println!("{:<14} {:.2} ms", $name, best);
+                }};
+            }
+            time_it!("list_pids", tmog_core::process::list_pids(root).len());
+            time_it!("stat-only-walk", {
+                let ps = tmog_core::process::list_pids(root);
+                let mut n = 0;
+                for pid in ps {
+                    if tmog_core::process::collect_stat_only(root, pid).is_ok() {
+                        n += 1;
+                    }
+                }
+                n
+            });
+            time_it!("full-walk", {
+                use std::collections::HashMap;
+                let passwd: HashMap<u32, String> = tmog_core::process::parse_passwd(
+                    &std::fs::read_to_string("/etc/passwd").unwrap_or_default(),
+                );
+                let ps = tmog_core::process::list_pids(root);
+                let mut n = 0;
+                for pid in ps {
+                    if tmog_core::process::collect_one(root, pid, 4096, &passwd).is_ok() {
+                        n += 1;
+                    }
+                }
+                n
+            });
+            time_it!("hwmon", tmog_core::hwmon::collect(root).len());
+            time_it!("gpu", {
+                if let Some(n) = tmog_core::gpu::Nvml::new() {
+                    n.sample(0);
+                }
+            });
+            time_it!("psi x2", {
+                let _ = tmog_core::pressure::collect_pressure(root, "memory");
+                let _ = tmog_core::pressure::collect_pressure(root, "io");
+            });
+            time_it!("sysinfo", tmog_core::sysinfo::collect(root));
+            time_it!("disks+identity", {
+                let d = tmog_core::diskstats::collect(root).unwrap_or_default();
+                for c in &d {
+                    let _ = tmog_core::diskstats::read_identity(root, &c.name);
+                    let _ = tmog_core::diskstats::is_partition(root, &c.name);
+                }
+                d.len()
+            });
         }
         Some("--snapshot") => std::process::exit(snapshot()),
         Some("--") | None => gui::run()?,

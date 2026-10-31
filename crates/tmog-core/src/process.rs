@@ -169,15 +169,37 @@ pub fn collect_one(
     page_bytes: u64,
     passwd: &HashMap<u32, String>,
 ) -> Result<Proc, String> {
+    let mut p = collect_stat_only(root, pid)?;
+    enrich_one(root, pid, page_bytes, passwd, &mut p);
+    Ok(p)
+}
+
+/// Cheap tier: parse only `/proc/[pid]/stat` (pid, comm, state, ppid,
+/// cpu times, nice, threads, starttime). rss/swap/user/cmdline stay
+/// empty until `enrich_one` runs (slow tier, on demand).
+pub fn collect_stat_only(root: &Path, pid: u32) -> Result<Proc, String> {
     use crate::fs;
     let base = format!("proc/{pid}");
-    let mut p =
-        parse_stat(&fs::read_under(root, &format!("{base}/stat")).map_err(|e| e.to_string())?)?;
+    parse_stat(&fs::read_under(root, &format!("{base}/stat")).map_err(|e| e.to_string())?)
+}
+
+/// Slow tier: fill in status/statm/cmdline/user for an already-parsed
+/// `Proc`. Called only for rows the GUI actually shows (or the followed
+/// pid), which is why it is split from `collect_stat_only`.
+pub fn enrich_one(
+    root: &Path,
+    pid: u32,
+    page_bytes: u64,
+    passwd: &HashMap<u32, String>,
+    p: &mut Proc,
+) {
+    use crate::fs;
+    let base = format!("proc/{pid}");
     if let Ok(t) = fs::read_under(root, &format!("{base}/status")) {
-        apply_status(&mut p, &t);
+        apply_status(p, &t);
     }
     if let Ok(t) = fs::read_under(root, &format!("{base}/statm")) {
-        apply_statm(&mut p, &t, page_bytes);
+        apply_statm(p, &t, page_bytes);
     }
     let cmdline_path = root.join(format!("{base}/cmdline"));
     if let Ok(b) = std::fs::read(&cmdline_path) {
@@ -186,7 +208,6 @@ pub fn collect_one(
     if let Some(uid) = p.uid {
         p.user = passwd.get(&uid).cloned();
     }
-    Ok(p)
 }
 
 /// List numeric process dirs under `/proc` (unsorted; caller sorts).

@@ -209,10 +209,25 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       live table state); changes save to TOML immediately with an inline
       error row on failure. Also closes the gap for tray-driven rate
       persistence
-- [ ] Medium tier: process ROWS every 3rd tick; CPU% deltas computed
-      against the last real sample so they stay honest between.
-- [ ] Slow tier: status/statm/cmdline only for visible rows +
-      selected/followed pid (GUI tells the Sampler which pids it shows).
+- [x] Medium tier (rows + hwmon every 3rd tick): CPU% computed against
+      the last real sample over the exact tick window (agg_ticks minus
+      the row-pass baseline), so updates reflect the full 3-tick span.
+      Measured (release, llm, ~740 procs): light tick 0.25 ms vs full
+      37 ms; average tick 37 ms → ~12 ms. RSTMOG_ROW_EVERY=1 restores
+      the old always-full behavior for A/B.
+      Debugging note: the first measurements looked wrong (light ticks
+      "35 ms", rows "0.25 ms") because (a) the real costs were hwmon
+      ~29 ms + process walk ~8 ms (gpu's 16 ms in --bench-phases is
+      that bench re-initializing NVML per call; the sampler holds one handle), NOT the process walk (my earlier
+      assumption was wrong), and (b) the bench classified ticks BEFORE
+      ticking. Both fixed; --bench-phases added for per-collector cost.
+- [x] Slow tier: process::collect_one split into collect_stat_only (fast)
+      + enrich_one (status/statm/cmdline/user); the Processes page sends
+      the visible slice (first 40 of the current sort) + selected pid to
+      the sampler each frame over a channel; enrichment runs in batches
+      of 25/tick (fast-scroll backlog drains over a few ticks). Rows
+      carry rss/cmdline/user forward between passes so columns never
+      blank out.
 
 ## Phase 4 — GUI (egui). Each page: renders from Sampler snapshots only
 

@@ -19,6 +19,7 @@ pub struct SamplerHandle {
     shared: Arc<RwLock<Arc<Snapshot>>>,
     stop: Arc<AtomicBool>,
     refresh_ms: Arc<AtomicU32>,
+    tx_detail: crossbeam_channel::Sender<Vec<u32>>,
     joiner: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -37,6 +38,7 @@ impl SamplerHandle {
         let shared_t = Arc::clone(&shared);
         let stop_t = Arc::clone(&stop);
         let rate_t = Arc::clone(&rate);
+        let (tx_detail, rx_detail) = crossbeam_channel::unbounded::<Vec<u32>>();
         let joiner = std::thread::Builder::new()
             .name("rstmog-sampler".into())
             .spawn(move || {
@@ -45,6 +47,10 @@ impl SamplerHandle {
                 // effective cadence degrades gracefully.
                 while !stop_t.load(Ordering::Relaxed) {
                     let began = Instant::now();
+                    // slow-tier detail requests from the UI thread
+                    if let Ok(pids) = rx_detail.try_recv() {
+                        sampler.request_detail(&pids);
+                    }
                     sampler.tick();
                     *shared_t.write().unwrap() = Arc::new(sampler.snapshot.clone());
                     let period = Duration::from_millis(rate_t.load(Ordering::Relaxed) as u64);
@@ -64,6 +70,7 @@ impl SamplerHandle {
             shared,
             stop,
             refresh_ms: rate,
+            tx_detail,
             joiner: Some(joiner),
         }
     }
@@ -71,6 +78,12 @@ impl SamplerHandle {
     /// Latest published snapshot (cheap: Arc clone under a short read lock).
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.shared.read().unwrap().clone()
+    }
+
+    /// Ask the sampler thread to fully enrich these pids next tick
+    /// (visible table slice + selection). Non-blocking.
+    pub fn request_detail(&self, pids: &[u32]) {
+        let _ = self.tx_detail.try_send(pids.to_vec());
     }
 
     /// Shared refresh-rate handle (for the repaint driver to track).

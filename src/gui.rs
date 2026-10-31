@@ -81,6 +81,21 @@ impl App {
         app
     }
 
+    /// Pids in the table's current display order, first `n` of them
+    /// (mirrors the filter+sort the page performs, without re-drawing).
+    fn visible_pids(&self, snap: &crate::sampler::Snapshot, n: usize) -> Vec<u32> {
+        use tmog_core::process_table;
+        let mut rows: Vec<_> = snap
+            .procs
+            .iter()
+            .filter(|r| process_table::matches(r, &self.proc_state.filter))
+            .cloned()
+            .collect();
+        process_table::sort_rows(&mut rows, self.proc_state.sort, self.proc_state.dir);
+        rows.truncate(n);
+        rows.iter().map(|r| r.proc.pid).collect()
+    }
+
     /// Drain tray menu events into app behavior.
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
         let Some(tray) = &self.tray else { return };
@@ -172,6 +187,10 @@ impl App {
         });
     }
 }
+
+/// Rows we ask to have rss/cmdline/user populated for (a generous
+/// viewport estimate at the default window height).
+const VISIBLE_ROWS: usize = 40;
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -327,6 +346,18 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.render_central(ui, &snap_arc, self.page);
         });
+
+        // slow tier: ask the sampler to enrich the pids we can actually
+        // see (first `visible_rows` of the current sort + selection)
+        if self.page == Page::Processes {
+            let mut pids: Vec<u32> = self.visible_pids(&snap_arc, VISIBLE_ROWS);
+            if let Some(sel) = self.proc_state.selected
+                && !pids.contains(&sel)
+            {
+                pids.push(sel);
+            }
+            self.sampler.request_detail(&pids);
+        }
 
         // execute any action the processes context menu requested
         if let Some(action) = self.proc_state.pending_action.take() {
