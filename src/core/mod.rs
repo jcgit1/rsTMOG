@@ -10,4 +10,5 @@ pub mod fs;
 pub mod loadavg;
 pub mod meminfo;
 pub mod pressure;
+pub mod process;
 pub mod ring;

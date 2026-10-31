@@ -71,9 +71,10 @@ into `--self-test`; hardware-dependent ones warn, never fail)
 - [x] `core/vmstat.rs` + `core/pressure.rs` (PSI some/full avg lines)
       — one module (`pressure.rs`): vmstat map + PSI parse/collect,
       PSI absent → warn-only in self-test
-- [ ] `core/process.rs` — `/proc/[pid]/stat` (comm with spaces/parens!),
+- [x] `core/process.rs` — `/proc/[pid]/stat` (comm with spaces/parens!),
       status/statm/cmdline (NUL argv, empty cmdline → kernel thread),
-      uid→user; fake proc-root end-to-end test
+      uid→user; fake proc-root end-to-end test. Live check: 778 procs
+      collected, matches `ps -e` exactly
 - [ ] `core/process_table.rs` — per-process CPU% between snapshots; tree
       (ppid chains, orphans float to root, cycle rows surface flat);
       sort/filter model with deterministic pid tiebreak

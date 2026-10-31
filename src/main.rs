@@ -165,6 +165,45 @@ fn self_test() -> i32 {
         })(),
     );
 
+    check(
+        "process enumeration",
+        (|| {
+            let passwd = std::fs::read_to_string("/etc/passwd")
+                .map(|s| core::process::parse_passwd(&s))
+                .unwrap_or_default();
+            let pids = core::process::list_pids(Path::new("/"));
+            if pids.is_empty() {
+                return Err("no pids under /proc".into());
+            }
+            // collect every readable process; unreadable ones (exited,
+            // permission) are tolerated like the C++ reference does.
+            let mut ok = 0usize;
+            let mut me: Option<core::process::Proc> = None;
+            for pid in &pids {
+                if let Ok(p) = core::process::collect_one(Path::new("/"), *pid, 4096, &passwd) {
+                    ok += 1;
+                    if std::process::id() == *pid {
+                        me = Some(p);
+                    }
+                }
+            }
+            if ok < 10 {
+                return Err(format!("only {ok} processes collected"));
+            }
+            let m = me.ok_or("self not found in process list")?;
+            detail(&format!(
+                "{} processes; self = {:?} (uid {:?} user {:?}, rss {} KiB, nice {})",
+                ok,
+                m.display_name(),
+                m.uid,
+                m.user,
+                m.rss_bytes / 1024,
+                m.nice,
+            ));
+            Ok(())
+        })(),
+    );
+
     if failures == 0 {
         line("self-test PASSED");
         0
