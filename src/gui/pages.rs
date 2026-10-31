@@ -332,43 +332,42 @@ pub fn memory_ui(ui: &mut egui::Ui, s: &Snapshot) {
 
 pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
     ui.heading("Disks");
-    egui::Grid::new("disks")
-        .num_columns(3)
-        .spacing([18.0, 4.0])
-        .show(ui, |ui| {
-            for d in &s.disks {
-                if !tmog_core::diskstats::is_physical_candidate(&d.name) {
-                    continue;
+    // Per-disk sections in plain vertical layout (NOT a Grid): a graph
+    // inside a grid cell only gets the column's natural width, which is
+    // why the graphs used to render short.
+    for d in &s.disks {
+        if !tmog_core::diskstats::is_physical_candidate(&d.name) {
+            continue;
+        }
+        let id = tmog_core::diskstats::read_identity(std::path::Path::new("/"), &d.name);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(&d.name).strong());
+            ui.label(id.model.unwrap_or("-".into()));
+            ui.label(format!(
+                "read {} M  write {} M  {}",
+                d.read_bytes / 1_000_000,
+                d.write_bytes / 1_000_000,
+                match id.rotational {
+                    Some(1) => "HDD",
+                    Some(_) => "SSD",
+                    None => "?",
                 }
-                let id = tmog_core::diskstats::read_identity(std::path::Path::new("/"), &d.name);
-                ui.label(d.name.clone());
-                ui.label(id.model.unwrap_or("-".into()));
-                ui.label(format!(
-                    "read {} M  write {} M  busy {}",
-                    d.read_bytes / 1_000_000,
-                    d.write_bytes / 1_000_000,
-                    match id.rotational {
-                        Some(1) => "HDD".to_string(),
-                        Some(_) => "SSD".to_string(),
-                        None => "?".to_string(),
-                    }
-                ));
-                ui.end_row();
-                if let Some((_, rh, wh)) = s.hist_disk.iter().find(|e| e.0 == d.name) {
-                    let m = hist_model2(
-                        "read",
-                        egui::Color32::from_rgb(80, 200, 120),
-                        rh,
-                        "write",
-                        egui::Color32::from_rgb(230, 170, 60),
-                        wh,
-                        WINDOW,
-                    );
-                    super::graph::graph_ui(ui, &m, 64.0);
-                    ui.end_row();
-                }
-            }
+            ));
         });
+        if let Some((_, rh, wh)) = s.hist_disk.iter().find(|e| e.0 == d.name) {
+            let m = hist_model2(
+                "read",
+                egui::Color32::from_rgb(80, 200, 120),
+                rh,
+                "write",
+                egui::Color32::from_rgb(230, 170, 60),
+                wh,
+                WINDOW,
+            );
+            super::graph::graph_ui(ui, &m, 70.0);
+        }
+        ui.add_space(10.0);
+    }
 }
 
 pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
@@ -393,40 +392,38 @@ pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
         ))
         .weak(),
     );
-    egui::Grid::new("net")
-        .num_columns(4)
-        .spacing([18.0, 4.0])
-        .show(ui, |ui| {
-            for n in &s.nets {
-                if n.name == "lo" {
-                    continue;
-                }
-                let id = tmog_core::netdev::read_identity(std::path::Path::new("/"), &n.name);
-                ui.label(n.name.clone());
-                let speed = id.speed_mbps.map(|s| format!("{s}M")).unwrap_or_default();
-                let mac = id.mac.clone().unwrap_or_default();
-                ui.label(format!(
-                    "{:?} {speed} {mac}",
-                    id.kind(std::path::Path::new("/"))
-                ));
-                ui.label(format!("rx {} MB", n.rx_bytes / 1_000_000));
-                ui.label(format!("tx {} MB", n.tx_bytes / 1_000_000));
-                ui.end_row();
-                if let Some((_, rh, th)) = s.hist_net.iter().find(|e| e.0 == n.name) {
-                    let m = hist_model2(
-                        "rx",
-                        egui::Color32::from_rgb(80, 170, 230),
-                        rh,
-                        "tx",
-                        egui::Color32::from_rgb(230, 120, 120),
-                        th,
-                        WINDOW,
-                    );
-                    super::graph::graph_ui(ui, &m, 64.0);
-                    ui.end_row();
-                }
-            }
+    // per-interface sections in vertical layout (same fix as the Disks
+    // page: graphs inside Grid cells don't stretch to the window width)
+    for n in &s.nets {
+        if n.name == "lo" {
+            continue;
+        }
+        let id = tmog_core::netdev::read_identity(std::path::Path::new("/"), &n.name);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(&n.name).strong());
+            let speed = id.speed_mbps.map(|s| format!("{s}M")).unwrap_or_default();
+            let mac = id.mac.clone().unwrap_or_default();
+            ui.label(format!(
+                "{:?} {speed} {mac}",
+                id.kind(std::path::Path::new("/"))
+            ));
+            ui.label(format!("rx {} MB", n.rx_bytes / 1_000_000));
+            ui.label(format!("tx {} MB", n.tx_bytes / 1_000_000));
         });
+        if let Some((_, rh, th)) = s.hist_net.iter().find(|e| e.0 == n.name) {
+            let m = hist_model2(
+                "rx",
+                egui::Color32::from_rgb(80, 170, 230),
+                rh,
+                "tx",
+                egui::Color32::from_rgb(230, 120, 120),
+                th,
+                WINDOW,
+            );
+            super::graph::graph_ui(ui, &m, 70.0);
+        }
+        ui.add_space(10.0);
+    }
 }
 
 pub fn thermals_ui(ui: &mut egui::Ui, s: &Snapshot) {
