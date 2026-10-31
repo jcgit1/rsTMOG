@@ -81,8 +81,9 @@ into `--self-test`; hardware-dependent ones warn, never fail)
 - [x] `core/diskstats.rs` — `/proc/diskstats` + `/sys/class/block` (model,
       rotational, partition filter), sectors→bytes, rate + util clamp,
       wrap guard (Counter in ring.rs handles wrap/re-baseline)
-- [ ] `core/netdev.rs` — `/proc/net/dev` rx/tx rates + wrap guard;
-      `/sys/class/net/*` (speed, operstate, mtu, mac, kind)
+- [x] `core/netdev.rs` — `/proc/net/dev` rx/tx rates + wrap guard
+      (RateTracker); `/sys/class/net/*` speed/operstate/mtu/mac +
+      kind classification (lo/wifi/virtual-before-type/wired/other)
 - [ ] `core/hwmon.rs` — temps/fans/voltages, millidegree scaling, label
       fallback, faulted-sensor skip + `select_cpu_temp()` priority
       (coretemp package → AMD Tctl/Tdie → ARM cpu_thermal → hottest core →

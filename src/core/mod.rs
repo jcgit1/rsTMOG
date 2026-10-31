@@ -10,6 +10,7 @@ pub mod diskstats;
 pub mod fs;
 pub mod loadavg;
 pub mod meminfo;
+pub mod netdev;
 pub mod pressure;
 pub mod process;
 pub mod process_table;

@@ -115,6 +115,12 @@ impl Counter {
     pub fn last(&self) -> Option<u64> {
         self.last
     }
+
+    /// Alias used by wrappers that need to detect a zero-progress tick
+    /// (idle network interface) before sampling.
+    pub fn last_value(&self) -> Option<u64> {
+        self.last
+    }
 }
 
 /// Tracks a value over time with a clock function, emitting
@@ -142,6 +148,12 @@ impl RateTracker {
             counter: Counter::new(),
             last_us: None,
         }
+    }
+
+    /// Last raw value seen — lets callers distinguish a genuinely idle
+    /// counter (zero delta, still counting) from "no data yet".
+    pub fn last_value(&self) -> Option<u64> {
+        self.counter.last_value()
     }
 
     /// Feed `(value, clock_us)`; returns units/second or Unknown.

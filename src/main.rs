@@ -229,6 +229,37 @@ fn self_test() -> i32 {
         })(),
     );
 
+    check(
+        "netdev + identity",
+        (|| {
+            let rows = core::netdev::collect(Path::new("/"))?;
+            if rows.is_empty() {
+                return Err("no net/dev rows".into());
+            }
+            let mut desc = Vec::new();
+            for r in rows.iter().take(4) {
+                let id = core::netdev::read_identity(Path::new("/"), &r.name);
+                let kind = id.kind(Path::new("/"));
+                desc.push(format!(
+                    "{}:{}{}",
+                    r.name,
+                    match kind {
+                        core::netdev::NetKind::Loopback => "lo",
+                        core::netdev::NetKind::Wifi => "wifi",
+                        core::netdev::NetKind::Wired => "wired",
+                        core::netdev::NetKind::Virtual => "virt",
+                        core::netdev::NetKind::Other => "other",
+                    },
+                    id.speed_mbps
+                        .map(|s| format!(" {s}Mbps"))
+                        .unwrap_or_default()
+                ));
+            }
+            detail(&format!("{} ifaces: {}", rows.len(), desc.join(", ")));
+            Ok(())
+        })(),
+    );
+
     if failures == 0 {
         line("self-test PASSED");
         0
