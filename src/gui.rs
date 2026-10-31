@@ -30,10 +30,18 @@ impl App {
     pub fn new() -> Self {
         let mut sampler = Sampler::new();
         sampler.tick(); // seed tick
+        // user-configurable cadence (Phase 4 settings dialog; TOML today)
+        let refresh_ms = match crate::core::settings::load(&crate::core::settings::default_path()) {
+            Ok(s) => s.refresh_ms,
+            Err(e) => {
+                eprintln!("settings: {e} (using defaults)");
+                crate::core::settings::Settings::default().refresh_ms
+            }
+        };
         App {
             sampler,
             page: Page::Summary,
-            refresh_ms: 1000,
+            refresh_ms,
             timer_started: false,
         }
     }

@@ -142,6 +142,23 @@ into `--self-test`; hardware-dependent ones warn, never fail)
       unprivileged callers within RLIMIT_NICE + own-nice floor; tests
       predict, not assume EPERM
 
+## Phase 4.5 — Polling cost (user-flagged 2026-10-31)
+
+Measured on llm (debug build): full `tick()` = ~62 ms avg / 156 ms worst
+across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
+
+- [x] **Fast tier now:** `refresh_ms` (default 1000; 500/1000/2000 ladder)
+      is read from settings at startup; the repaint driver and sample
+      cadence follow it.
+- [ ] Settings dialog lets the user change the poll rate at runtime
+      (Phase 4 dialog item; persisted via core/settings).
+- [ ] Background sampler thread so paint never waits on a tick
+      (Arc<Mutex<Snapshot>> handoff; tick cost moves off the UI thread).
+- [ ] Medium tier: process ROWS every 3rd tick; CPU% deltas computed
+      against the last real sample so they stay honest between.
+- [ ] Slow tier: status/statm/cmdline only for visible rows +
+      selected/followed pid (GUI tells the Sampler which pids it shows).
+
 ## Phase 4 — GUI (egui). Each page: renders from Sampler snapshots only
 
 - [ ] App shell: sidebar nav, page stack, status footer, tick loop
