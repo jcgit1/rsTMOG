@@ -363,35 +363,6 @@ pub fn thermals_ui(ui: &mut egui::Ui, s: &Snapshot) {
         });
 }
 
-pub fn processes_ui(ui: &mut egui::Ui, s: &Snapshot) {
-    ui.heading("Processes");
-    ui.weak("full sortable table landing next phase; v1 shows the top 30 by CPU");
-    let mut rows: Vec<_> = s.procs.iter().collect();
-    rows.sort_by(|a, b| {
-        b.cpu
-            .unwrap_or(0.0)
-            .partial_cmp(&a.cpu.unwrap_or(0.0))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    egui::Grid::new("procs")
-        .num_columns(4)
-        .spacing([16.0, 2.0])
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new("pid").strong());
-            ui.label(egui::RichText::new("name").strong());
-            ui.label(egui::RichText::new("cpu%").strong());
-            ui.label(egui::RichText::new("rss").strong());
-            ui.end_row();
-            for r in rows.iter().take(30) {
-                ui.label(r.proc.pid.to_string());
-                ui.label(egui::RichText::new(r.proc.display_name()).monospace());
-                ui.label(r.cpu.map(|c| format!("{c:.1}")).unwrap_or("-".into()));
-                ui.label(format!("{} MiB", r.proc.rss_bytes / (1024 * 1024)));
-                ui.end_row();
-            }
-        });
-}
-
 pub fn system_ui(ui: &mut egui::Ui, s: &Snapshot) {
     ui.heading("System");
     if let Some(si) = &s.sysinfo {

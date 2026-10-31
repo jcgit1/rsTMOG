@@ -4,6 +4,7 @@
 //! unit-tested without root or a live procfs (mirrors the evildojo-tmog
 //! design, in idiomatic Rust).
 
+pub mod actions;
 pub mod cpu;
 pub mod cpuinfo;
 pub mod diskstats;

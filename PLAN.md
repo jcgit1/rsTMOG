@@ -135,6 +135,15 @@ into `--self-test`; hardware-dependent ones warn, never fail)
 
 - [ ] `core/actions.rs`: signal primitives; reject pid ≤ 0 (kill(0)/
       kill(-1) are broadcast!) before anything reaches kill()
+- [x] `core/actions.rs` — signal primitives + `end_task` (SIGTERM→grace→
+      SIGKILL) / force_kill / suspend / resume / get+set_nice, all via a
+      tiny unsafe extern block (no libc crate). Every entry point rejects
+      pid ≤ 0 with EINVAL *before* the syscall (kill(0)=group, kill(-1)=
+      broadcast). Tests spawn real children: compliant child dies on
+      SIGTERM; a trap-ignoring child escalates to SIGKILL; suspend reaches
+      state T then resumes; renice raise works. The evildojo lesson is
+      honored: set_nice reports whatever the kernel says, no EPERM
+      assumption.
 - [ ] end_task: SIGTERM → bounded wait → SIGKILL (async, unlike C++
       blocking version); force kill
 - [ ] suspend/resume (SIGSTOP/SIGCONT), verified via state polling
@@ -184,9 +193,17 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       (cpu/mem/temp per-sample; per-disk and per-net read/write byte-rate
       series, ~4-min retention). Wired into Summary (cpu + temp), CPU
       (aggregate), Memory (used%), Disks (per-disk r/w), Network (rx/tx)
-- [ ] Processes page: sortable/filterable table, selection by pid survives
-      refresh, tree toggle (`└─` indents), follow mode, context menu
-      (end/force/suspend/priority ladder/copy cmdline) with errors shown
+- [x] Processes page: sortable/filterable table (header-click, live filter
+      over name/cmdline/user/pid), selection by pid survives refresh,
+      tree toggle (└ indents via core tree_rows), follow mode
+      (scroll_to_me center on the selected row), context menu
+      (end/force/suspend-resume by state/priority ladder High..Idle/copy
+      cmdline via egui clipboard), zombie rows red / stopped amber.
+      Pending actions execute via core::actions in App::run_proc_action;
+      failures go to stderr (a toast is a Phase 5 nicety). Sort/tree/
+      follow persist to settings on window close. `end_task` is currently
+      blocking on the UI thread (documented; short-lived + user-initiated,
+      async follow-up noted)
 - [ ] CPU page: aggregate + per-core grid, topology header, freq/governor
 - [ ] Memory page: in-use graph, stacked composition bar (ARC segment),
       PSI lines

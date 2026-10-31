@@ -23,19 +23,21 @@ pub fn cpu_percent(prev: &Proc, now: &Proc, total_ticks_delta: u64) -> Option<f6
     Some((d as f64 * 100.0 / total_ticks_delta as f64).clamp(0.0, 100.0))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortKey {
     Pid,
     Name,
+    #[default]
     Cpu,
     Mem,
     User,
     Threads,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortDir {
     Asc,
+    #[default]
     Desc,
 }
 

@@ -3,6 +3,7 @@
 
 pub mod graph;
 pub mod pages;
+pub mod proc_table;
 
 use crate::bg::SamplerHandle;
 use crate::core::settings::Settings;
@@ -28,6 +29,10 @@ pub struct App {
     snap: Arc<crate::sampler::Snapshot>,
     page: Page,
     settings: Settings,
+    proc_state: proc_table::ProcTableState,
+    /// text to place on the clipboard next update (Copy command line)
+    clipboard_text: Option<String>,
+    persisted: bool,
     applied_theme: Option<String>,
     timer_started: bool,
 }
@@ -48,7 +53,10 @@ impl App {
             sampler,
             snap,
             page: Page::Summary,
-            settings,
+            settings: settings.clone(),
+            proc_state: proc_table::ProcTableState::from_settings(&settings),
+            clipboard_text: None,
+            persisted: false,
             applied_theme: None,
             timer_started: false,
         }
@@ -59,11 +67,15 @@ impl App {
     pub fn new_for_capture(refresh_ms: u32) -> Self {
         let sampler = SamplerHandle::start(refresh_ms);
         let snap = sampler.snapshot();
+        let settings = Settings::default();
         App {
             sampler,
             snap,
             page: Page::Summary,
-            settings: Settings::default(),
+            proc_state: proc_table::ProcTableState::from_settings(&settings),
+            settings,
+            clipboard_text: None,
+            persisted: false,
             applied_theme: None,
             timer_started: false,
         }
@@ -122,6 +134,10 @@ impl eframe::App for App {
             self.applied_theme = Some(self.settings.theme.clone());
         }
         self.schedule(ctx);
+        // place any pending clipboard text (Copy command line)
+        if let Some(text) = self.clipboard_text.take() {
+            ctx.copy_text(text);
+        }
         // grab the latest snapshot published by the sampler thread
         self.snap = self.sampler.snapshot();
         let snap = &*self.snap;
@@ -169,10 +185,56 @@ impl eframe::App for App {
             });
         });
 
+        let snap = self.sampler.snapshot();
+        self.snap = snap;
+        let snap_arc = self.snap.clone();
         egui::CentralPanel::default().show(ctx, |ui| {
-            let snap = &*self.snap;
-            render_central(ui, snap, self.page);
+            self.render_central(ui, &snap_arc, self.page);
         });
+
+        // execute any action the processes context menu requested
+        if let Some(action) = self.proc_state.pending_action.take() {
+            self.run_proc_action(action);
+        }
+
+        // persist table prefs (sort/tree/follow) when the window closes
+        if ctx.input(|i| i.viewport().close_requested()) && !self.persisted {
+            self.proc_state.persist_into(&mut self.settings);
+            if let Err(e) =
+                crate::core::settings::save(&crate::core::settings::default_path(), &self.settings)
+            {
+                eprintln!("settings save: {e}");
+            }
+            self.persisted = true;
+        }
+    }
+}
+
+impl App {
+    /// Execute a process action off the paint path. end_task is blocking
+    /// (SIGTERM→wait→SIGKILL) — acceptable here because it's user-
+    /// initiated and short-lived; heavy work would move to a thread.
+    fn run_proc_action(&mut self, a: proc_table::ProcAction) {
+        use crate::core::actions;
+        use std::time::Duration;
+        let res = match &a {
+            proc_table::ProcAction::EndTask(pid) => {
+                actions::end_task(*pid as i32, Duration::from_secs(3))
+            }
+            proc_table::ProcAction::ForceKill(pid) => actions::force_kill(*pid as i32),
+            proc_table::ProcAction::Suspend(pid) => actions::suspend(*pid as i32),
+            proc_table::ProcAction::Resume(pid) => actions::resume(*pid as i32),
+            proc_table::ProcAction::SetNice(pid, nice) => actions::set_nice(*pid as i32, *nice),
+            proc_table::ProcAction::CopyCmdline(cmd) => {
+                self.clipboard_text = Some(cmd.clone());
+                return;
+            }
+        };
+        if !res.ok {
+            // surface the failure; a toast in the footer would be nicer,
+            // stderr is honest for now
+            eprintln!("process action {a:?} failed: errno {}", res.errno);
+        }
     }
 }
 
@@ -220,22 +282,31 @@ pub fn theme_visuals(name: &str) -> egui::Visuals {
 /// Render one page's central panel into `ctx` (used by the window and by
 /// the headless capture).
 pub fn render_page(ctx: &egui::Context, app: &mut App, page: Page) {
+    let snap_arc = app.snap.clone();
     egui::CentralPanel::default().show(ctx, |ui| {
-        let snap = &*app.snap;
-        render_central(ui, snap, page);
+        app.render_central(ui, &snap_arc, page);
     });
 }
 
-pub fn render_central(ui: &mut egui::Ui, snap: &crate::sampler::Snapshot, page: Page) {
-    match page {
-        Page::Summary => pages::summary_ui(ui, snap),
-        Page::Cpu => pages::cpu_ui(ui, snap),
-        Page::Memory => pages::memory_ui(ui, snap),
-        Page::Disks => pages::disks_ui(ui, snap),
-        Page::Network => pages::network_ui(ui, snap),
-        Page::Thermals => pages::thermals_ui(ui, snap),
-        Page::Processes => pages::processes_ui(ui, snap),
-        Page::System => pages::system_ui(ui, snap),
+impl App {
+    /// Central page dispatch. The Processes page uses App-owned table
+    /// state (sort/filter/tree/follow/selection + pending actions).
+    pub fn render_central(
+        &mut self,
+        ui: &mut egui::Ui,
+        snap: &crate::sampler::Snapshot,
+        page: Page,
+    ) {
+        match page {
+            Page::Summary => pages::summary_ui(ui, snap),
+            Page::Cpu => pages::cpu_ui(ui, snap),
+            Page::Memory => pages::memory_ui(ui, snap),
+            Page::Disks => pages::disks_ui(ui, snap),
+            Page::Network => pages::network_ui(ui, snap),
+            Page::Thermals => pages::thermals_ui(ui, snap),
+            Page::Processes => proc_table::processes_table_ui(ui, snap, &mut self.proc_state),
+            Page::System => pages::system_ui(ui, snap),
+        }
     }
 }
 
