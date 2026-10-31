@@ -47,15 +47,18 @@ once the core API settles — splitting earlier churns more than it helps.
 
 ## Phase 1 — Core plumbing (code + unit tests)
 
-- [ ] `core/ring.rs` — history ring buffer + `RateTracker` with injected
-      clock (fn/trait, tests use fake clock): capacity eviction,
-      min/max/latest, counter-wrap and reset re-baseline
-- [ ] `core/fs.rs` — read file / read dir-tree helpers taking a root `Path`
-      parameter (fixture roots in tests, `/` in prod); tolerate EACCES
-- [ ] `--self-test` and `--snapshot` CLI skeleton in main.rs (clap or manual
-      arg match — keep it boring); `--version`
-- [ ] CPU: delta → busy% between two `CpuJiffies` samples (zero-delta
-      guard), aggregate + per-core
+- [x] `core/ring.rs` — history ring buffer + `RateTracker` with injected
+      clock (tests use fake clock): capacity eviction, min/max/latest,
+      re-baseline on backwards counters. Design note: a u64 wrap and a
+      subsystem restart are indistinguishable from two samples — we
+      re-baseline (Reset) rather than fabricate a wrap spike
+- [x] `core/fs.rs` — read file / u64 / sorted dir-list helpers taking a
+      root `Path` (fixture roots in tests, `/` in prod); missing optional
+      dirs → empty list
+- [x] `--self-test` and `--snapshot` CLI in main.rs (plain arg match),
+      `--version`; broken-pipe-safe printing (piping to `head` exits 0)
+- [x] CPU: delta → busy% between two `CpuJiffies` samples (zero-delta
+      guard, backwards guard, iowait = not busy)
 
 ## Phase 2 — Metrics collectors (one checkbox = parser + fixtures + wiring
 into `--self-test`; hardware-dependent ones warn, never fail)

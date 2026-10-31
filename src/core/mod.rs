@@ -5,3 +5,5 @@
 //! design, in idiomatic Rust).
 
 pub mod cpu;
+pub mod fs;
+pub mod ring;

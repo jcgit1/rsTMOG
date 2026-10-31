@@ -58,9 +58,36 @@ pub fn parse_cpu_line(line: &str) -> Option<CpuJiffies> {
     })
 }
 
+/// Busy percentage (0.0..=100.0) between two samples of the same CPU row.
+/// Returns `None` when no time passed (zero delta) or time went backwards,
+/// so callers keep the previous value instead of painting a spike.
+pub fn busy_percent(prev: &CpuJiffies, now: &CpuJiffies) -> Option<f64> {
+    let total_prev = prev.total();
+    let total_now = now.total();
+    if total_now <= total_prev {
+        return None;
+    }
+    let busy_prev = prev.busy();
+    let busy_now = now.busy();
+    // busy counters are monotonic per-field, so busy_now >= busy_prev
+    // whenever total advanced; clamp for pathological fixture inputs.
+    let busy_delta = busy_now.saturating_sub(busy_prev);
+    let pct = busy_delta as f64 * 100.0 / (total_now - total_prev) as f64;
+    Some(pct.clamp(0.0, 100.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample(name: &str, busy: u64, idle: u64) -> CpuJiffies {
+        CpuJiffies {
+            name: name.into(),
+            user: busy,
+            idle,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn parses_full_line() {
@@ -83,5 +110,35 @@ mod tests {
     fn rejects_non_cpu_lines() {
         assert!(parse_cpu_line("intr 12345").is_none());
         assert!(parse_cpu_line("").is_none());
+    }
+
+    #[test]
+    fn busy_percent_half_busy() {
+        let prev = sample("cpu", 100, 100);
+        let now = sample("cpu", 150, 150); // +50 busy, +100 total
+        assert_eq!(busy_percent(&prev, &now), Some(50.0));
+    }
+
+    #[test]
+    fn busy_percent_zero_delta_guard() {
+        let prev = sample("cpu", 100, 100);
+        assert_eq!(busy_percent(&prev, &prev), None); // no time passed
+        let backwards = sample("cpu", 50, 50); // counter went backwards
+        assert_eq!(busy_percent(&prev, &backwards), None);
+    }
+
+    #[test]
+    fn busy_percent_all_idle_and_all_busy() {
+        let prev = sample("cpu", 0, 0);
+        assert_eq!(busy_percent(&prev, &sample("cpu", 0, 100)), Some(0.0));
+        assert_eq!(busy_percent(&prev, &sample("cpu", 100, 0)), Some(100.0));
+    }
+
+    #[test]
+    fn iowait_counts_as_not_busy() {
+        // iowait is excluded from busy (matches C++ reference semantics)
+        let prev = parse_cpu_line("cpu 0 0 0 0 0").unwrap();
+        let now = parse_cpu_line("cpu 50 0 0 0 50").unwrap(); // 50 user, 50 iowait
+        assert_eq!(busy_percent(&prev, &now), Some(50.0));
     }
 }
