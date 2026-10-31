@@ -459,6 +459,26 @@ fn main() -> anyhow::Result<()> {
             }
             println!("smoke PASSED ({} pages)", pages.len());
         }
+        Some("--bench-tick") => {
+            let n: u64 = args.next().and_then(|v| v.parse().ok()).unwrap_or(20);
+            let mut s = sampler::Sampler::new();
+            s.tick();
+            let mut worst = 0f64;
+            let mut tot = 0f64;
+            for _ in 0..n {
+                let t0 = std::time::Instant::now();
+                s.tick();
+                let e = t0.elapsed().as_secs_f64() * 1000.0;
+                worst = worst.max(e);
+                tot += e;
+            }
+            println!(
+                "ticks={n} avg={:.2}ms worst={:.2}ms procs={}",
+                tot / n as f64,
+                worst,
+                s.snapshot.procs.len()
+            );
+        }
         Some("--snapshot") => std::process::exit(snapshot()),
         Some("--") | None => gui::run()?,
         Some(other) => {

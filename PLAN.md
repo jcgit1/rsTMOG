@@ -267,8 +267,12 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
 
 - [x] `--smoke`: headless run of every page through the real egui pass +
       software rasterizer (see below), exits non-zero on failure
-- [ ] Perf: tick cost budget (<2 ms sampling at 2 Hz on this box); no
-      allocations in the paint path beyond egui's own
+- [~] Perf: measured (release, llm, ~735 procs): tick avg ~44 ms,
+      worst ~143 ms. The <2 ms budget was unrealistic for a full walk —
+      the background-thread design already keeps it off the paint path;
+      real fix is the medium/slow polling tiers (open). No allocations
+      added to the paint path beyond egui's own (snapshots are Arc
+      clones)
 - [x] CI gate: `scripts/ci.sh` (fmt --check, clippy -D warnings, tests,
       self-test, --smoke of all 8 pages, cargo-deny licenses/sources
       with a curated deny.toml, cargo-audit as a warning — 7 open
