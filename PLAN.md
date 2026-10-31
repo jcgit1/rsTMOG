@@ -78,9 +78,9 @@ into `--self-test`; hardware-dependent ones warn, never fail)
 - [x] `core/process_table.rs` — per-process CPU% between snapshots; tree
       (ppid chains, orphans float to root, cycle rows surface flat);
       sort/filter model with deterministic pid tiebreak
-- [ ] `core/diskstats.rs` — `/proc/diskstats` + `/sys/class/block` (model,
+- [x] `core/diskstats.rs` — `/proc/diskstats` + `/sys/class/block` (model,
       rotational, partition filter), sectors→bytes, rate + util clamp,
-      wrap guard
+      wrap guard (Counter in ring.rs handles wrap/re-baseline)
 - [ ] `core/netdev.rs` — `/proc/net/dev` rx/tx rates + wrap guard;
       `/sys/class/net/*` (speed, operstate, mtu, mac, kind)
 - [ ] `core/hwmon.rs` — temps/fans/voltages, millidegree scaling, label

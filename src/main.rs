@@ -204,6 +204,31 @@ fn self_test() -> i32 {
         })(),
     );
 
+    check(
+        "diskstats parses",
+        (|| {
+            let d = core::diskstats::collect(Path::new("/"))?;
+            let phys: Vec<_> = d
+                .iter()
+                .filter(|c| core::diskstats::is_physical_candidate(&c.name))
+                .filter(|c| !core::diskstats::is_partition(Path::new("/"), &c.name))
+                .collect();
+            if phys.is_empty() {
+                return Err("no physical disks found".into());
+            }
+            let id = core::diskstats::read_identity(Path::new("/"), &phys[0].name);
+            detail(&format!(
+                "{} devices, {} physical candidates (first: {} {:?} rot={:?})",
+                d.len(),
+                phys.len(),
+                phys[0].name,
+                id.model.as_deref().unwrap_or("-"),
+                id.rotational
+            ));
+            Ok(())
+        })(),
+    );
+
     if failures == 0 {
         line("self-test PASSED");
         0

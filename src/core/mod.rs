@@ -6,6 +6,7 @@
 
 pub mod cpu;
 pub mod cpuinfo;
+pub mod diskstats;
 pub mod fs;
 pub mod loadavg;
 pub mod meminfo;
