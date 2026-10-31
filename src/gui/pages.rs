@@ -4,6 +4,63 @@
 use crate::sampler::Snapshot;
 use eframe::egui;
 
+use crate::gui::graph::{GraphModel, Trace};
+
+/// Build a single-trace model from a (tick, value) history slice.
+fn hist_model(
+    name: &str,
+    color: egui::Color32,
+    hist: &[(u64, f64)],
+    window: usize,
+    percent: bool,
+) -> GraphModel {
+    let mut tr = Trace::new(name, color);
+    tr.samples = hist.to_vec();
+    let mut m = GraphModel::new(vec![tr], window, percent);
+    if let Some(&(last_t, _)) = hist.last() {
+        m.newest_tick = last_t;
+    }
+    let t0 = m.tick_window().0;
+    let mx = hist
+        .iter()
+        .filter(|(t, _)| *t >= t0)
+        .map(|(_, v)| *v)
+        .fold(0.0f64, f64::max);
+    m.scale.observe(mx);
+    m
+}
+
+/// Build a dual-trace model from two parallel histories.
+fn hist_model2(
+    n1: &str,
+    c1: egui::Color32,
+    h1: &[(u64, f64)],
+    n2: &str,
+    c2: egui::Color32,
+    h2: &[(u64, f64)],
+    window: usize,
+) -> GraphModel {
+    let mut t1 = Trace::new(n1, c1);
+    t1.samples = h1.to_vec();
+    let mut t2 = Trace::new(n2, c2);
+    t2.samples = h2.to_vec();
+    let mut m = GraphModel::new(vec![t1, t2], window, false);
+    if let Some(&(last_t, _)) = h1.last() {
+        m.newest_tick = last_t;
+    }
+    let t0 = m.tick_window().0;
+    let mx = h1
+        .iter()
+        .chain(h2.iter())
+        .filter(|(t, _)| *t >= t0)
+        .map(|(_, v)| *v)
+        .fold(0.0f64, f64::max);
+    m.scale.observe(mx);
+    m
+}
+
+const WINDOW: usize = 90; // ~90s at 1 Hz
+
 fn dash(o: Option<f64>, unit: &str) -> String {
     o.map(|v| format!("{v:.1}{unit}"))
         .unwrap_or_else(|| "-".into())
@@ -67,11 +124,51 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
             }
         });
     ui.add_space(10.0);
-    ui.weak("graphs landing next phase");
+    if !s.hist_cpu.is_empty() || !s.hist_temp.is_empty() {
+        ui.horizontal(|ui| {
+            if !s.hist_cpu.is_empty() {
+                let m = hist_model(
+                    "cpu",
+                    egui::Color32::from_rgb(80, 200, 120),
+                    &s.hist_cpu,
+                    60,
+                    true,
+                );
+                ui.vertical(|ui| {
+                    ui.label("CPU %");
+                    super::graph::graph_ui(ui, &m, 90.0);
+                });
+            }
+            if !s.hist_temp.is_empty() {
+                let m = hist_model(
+                    "temp",
+                    egui::Color32::from_rgb(230, 140, 60),
+                    &s.hist_temp,
+                    60,
+                    false,
+                );
+                ui.vertical(|ui| {
+                    ui.label("\u{b0}C");
+                    super::graph::graph_ui(ui, &m, 90.0);
+                });
+            }
+        });
+    }
 }
 
 pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot) {
     ui.heading(format!("CPU — {} busy", dash(s.aggregate, "%")));
+    if !s.hist_cpu.is_empty() {
+        let m = hist_model(
+            "cpu",
+            egui::Color32::from_rgb(80, 200, 120),
+            &s.hist_cpu,
+            WINDOW,
+            true,
+        );
+        super::graph::graph_ui(ui, &m, 90.0);
+        ui.add_space(8.0);
+    }
     ui.label(format!(
         "{} cores ({} logical)",
         s.sysinfo.as_ref().map(|_| s.per_core.len()).unwrap_or(0),
@@ -105,6 +202,17 @@ pub fn memory_ui(ui: &mut egui::Ui, s: &Snapshot) {
         ui.label("no data");
         return;
     };
+    if !s.hist_mem.is_empty() {
+        let gm = hist_model(
+            "mem",
+            egui::Color32::from_rgb(110, 150, 230),
+            &s.hist_mem,
+            WINDOW,
+            true,
+        );
+        super::graph::graph_ui(ui, &gm, 110.0);
+        ui.add_space(6.0);
+    }
     let frac = (m.used_percent() / 100.0) as f32;
     ui.add(egui::ProgressBar::new(frac).text(format!(
         "{} / {} ({}%)",
@@ -165,6 +273,19 @@ pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
                     d.write_bytes / 1_000_000
                 ));
                 ui.end_row();
+                if let Some((_, rh, wh)) = s.hist_disk.iter().find(|e| e.0 == d.name) {
+                    let m = hist_model2(
+                        "read",
+                        egui::Color32::from_rgb(80, 200, 120),
+                        rh,
+                        "write",
+                        egui::Color32::from_rgb(230, 170, 60),
+                        wh,
+                        WINDOW,
+                    );
+                    super::graph::graph_ui(ui, &m, 64.0);
+                    ui.end_row();
+                }
             }
         });
 }
@@ -185,6 +306,19 @@ pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 ui.label(format!("rx {} MB", n.rx_bytes / 1_000_000));
                 ui.label(format!("tx {} MB", n.tx_bytes / 1_000_000));
                 ui.end_row();
+                if let Some((_, rh, th)) = s.hist_net.iter().find(|e| e.0 == n.name) {
+                    let m = hist_model2(
+                        "rx",
+                        egui::Color32::from_rgb(80, 170, 230),
+                        rh,
+                        "tx",
+                        egui::Color32::from_rgb(230, 120, 120),
+                        th,
+                        WINDOW,
+                    );
+                    super::graph::graph_ui(ui, &m, 64.0);
+                    ui.end_row();
+                }
             }
         });
 }

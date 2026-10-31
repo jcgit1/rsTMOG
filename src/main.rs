@@ -398,9 +398,12 @@ fn main() -> anyhow::Result<()> {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::path::PathBuf::from("/tmp/rstmog-capture.png"));
             let mut app = gui::App::new();
-            // two ticks so deltas exist between samples
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            app.sampler.tick();
+            // Tick repeatedly so the history graphs accumulate a visible
+            // trace (~60 samples at 100 ms = one simulated minute).
+            for _ in 0..60 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                app.sampler.tick();
+            }
             headless::capture(&mut app, page, &out)?;
             println!("captured {page:?} -> {}", out.display());
         }

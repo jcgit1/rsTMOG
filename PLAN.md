@@ -146,8 +146,17 @@ into `--self-test`; hardware-dependent ones warn, never fail)
 
 - [ ] App shell: sidebar nav, page stack, status footer, tick loop
       (`Sampler` on a thread or `wg.tick` timer; refresh 0.5/1/2 s)
-- [ ] Graph widget: scrolling history (newest right), autoscale, quarter
-      grid, dual-trace (rx/tx, read/write); mapping math unit-tested
+- [x] Graph widget: scrolling history (newest pinned right), autoscale
+      (peak-hold follower: rises fast, falls slow), quarter grid +
+      percent-mode 0/25/50/75/100 labels; `window_to_ui` mapping is a
+      pure fn unit-tested without egui. Traces draw as a fill-under
+      polygon + solid quad segments (NOT a stroked Shape::line — stroked
+      paths tessellate to feather-AA quads that the software capture
+      rasterizer clips out; solid quads render identically in the GPU
+      path and headless capture). Histories live in the Sampler
+      (cpu/mem/temp per-sample; per-disk and per-net read/write byte-rate
+      series, ~4-min retention). Wired into Summary (cpu + temp), CPU
+      (aggregate), Memory (used%), Disks (per-disk r/w), Network (rx/tx)
 - [ ] Processes page: sortable/filterable table, selection by pid survives
       refresh, tree toggle (`└─` indents), follow mode, context menu
       (end/force/suspend/priority ladder/copy cmdline) with errors shown

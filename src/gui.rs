@@ -1,6 +1,7 @@
 //! egui/eframe frontend. v1 shell: sidebar nav, page stack, tick loop,
 //! status footer. The live data is in `Sampler`'s `Snapshot`.
 
+pub mod graph;
 pub mod pages;
 
 use crate::sampler::Sampler;
