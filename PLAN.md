@@ -92,8 +92,13 @@ into `--self-test`; hardware-dependent ones warn, never fail)
       (power_now/energy_now vs voltage×current/charge); RAPL joule-delta
       with `max_energy_range_uj` wraparound + unknown-range refusal.
       One module: `rapl.rs`. Live: battery 100% Full; RAPL unprivileged → warn
-- [ ] `core/gpu.rs` — NVML via nvml-wrapper: busy%, VRAM, clocks, power
-      draw/limit; absent driver → dash values, no crash, no build dep
+- [x] `core/gpu.rs` — NVML via nvml-wrapper (dlopen at runtime, zero
+      build-time NVIDIA deps): name, busy%, VRAM used/total, graphics/
+      memory clocks, power draw, temp; every field Option (unsupported
+      per-GPU fields degrade to dashes, absent driver -> Nvml::new() ==
+      None, never panics). Live: RTX 5090 Laptop GPU read fine.
+      (power limit via nvml power-limit APIs: deferred, needs
+      legacy-functions feature decision)
 - [x] `core/sysinfo.rs` — uname-ish (proc/sys/kernel files), os-release,
       boot time (now − uptime), uptime formatting
 - [x] `core/zfs.rs` — `/proc/spl/kstat/zfs/arcstats`; ARC-aware memory:
@@ -101,8 +106,10 @@ into `--self-test`; hardware-dependent ones warn, never fail)
       clamped; `mem_composition()` for the stacked bar, segments always
       sum to total. REQUIRED. Fixture-driven: this box has no ZFS module,
       the evildojo 89%-used incident is reproduced and fixed in tests
-- [ ] `core/settings.rs` — TOML in `dirs::config_dir()/rstmog/config.toml`;
-      round-trip tests; unknown keys preserved or tolerated
+- [x] `core/settings.rs` — TOML in `dirs::config_dir()/rstmog/config.toml`;
+      round-trip tests; unknown keys preserved (merge into existing table,
+      atomic temp+rename write); corrupt file = Err (GUI falls back with a
+      warning, never silently discards); serde(default) partial files
 - [ ] Split workspace: `crates/tmog-core` (lib, zero GUI deps) +
       `crates/rstmog` (bin)
 

@@ -304,6 +304,31 @@ fn self_test() -> i32 {
         ));
     }
 
+    match core::gpu::Nvml::new() {
+        Some(n) => {
+            let gpus = n.sample_all();
+            check("gpu (NVML)", Ok(()));
+            for g in gpus {
+                let fmt = |o: Option<f64>, unit: &str| {
+                    o.map(|v| format!("{v:.0}{unit}"))
+                        .unwrap_or_else(|| "-".into())
+                };
+                detail(&format!(
+                    "GPU{} {}: busy {} mem {}MiB clk {}MHz power {}/{}W temp {}",
+                    g.index,
+                    g.name,
+                    fmt(g.busy_percent, "%"),
+                    g.mem_used_mib.map(|m| m.to_string()).unwrap_or("-".into()),
+                    fmt(g.graphics_clock_mhz.map(|c| c as f64), ""),
+                    fmt(g.power_draw_w, ""),
+                    fmt(g.power_limit_w, ""),
+                    fmt(g.temp_c, "C"),
+                ));
+            }
+        }
+        None => line("warn  gpu: NVML unavailable (no driver or headless)"),
+    }
+
     if failures == 0 {
         line("self-test PASSED");
         0
