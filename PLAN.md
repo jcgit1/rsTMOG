@@ -265,10 +265,16 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
 
 ## Phase 5 — Fit & finish
 
-- [ ] `--smoke`: headless tick loop + all pages constructed (CI-able)
+- [x] `--smoke`: headless run of every page through the real egui pass +
+      software rasterizer (see below), exits non-zero on failure
 - [ ] Perf: tick cost budget (<2 ms sampling at 2 Hz on this box); no
       allocations in the paint path beyond egui's own
-- [ ] cargo-audit/deny wired into a CI script; fmt+clippy gate
+- [x] CI gate: `scripts/ci.sh` (fmt --check, clippy -D warnings, tests,
+      self-test, --smoke of all 8 pages, cargo-deny licenses/sources
+      with a curated deny.toml, cargo-audit as a warning — 7 open
+      advisories today are all transitive (zvariant/glib etc., flagged
+      unmaintained/unsound, none in a path we rely on for security);
+      none are deny-level yet. Ran end-to-end: CI PASSED
 - [ ] README rewrite (build, screenshots, desktop entry); LICENSE (MIT)
 - [ ] Packaging pass on this box: release build, `.desktop` entry
 

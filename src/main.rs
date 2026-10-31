@@ -421,6 +421,44 @@ fn main() -> anyhow::Result<()> {
             headless::capture(&mut app, page, &out)?;
             println!("captured {page:?} -> {}", out.display());
         }
+        Some("--smoke") => {
+            // Headless CI gate: build the app, accumulate some history,
+            // then run EVERY page through the real egui pass + software
+            // rasterizer to a throwaway image. Any panic or render error
+            // exits non-zero.
+            let mut app = gui::App::new_for_capture(50);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if app.sampler().snapshot().tick >= 10 {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    eprintln!("smoke: sampler stalled");
+                    std::process::exit(1);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            app.pull_snapshot();
+            let pages = [
+                ("summary", gui::Page::Summary),
+                ("cpu", gui::Page::Cpu),
+                ("memory", gui::Page::Memory),
+                ("disks", gui::Page::Disks),
+                ("network", gui::Page::Network),
+                ("thermals", gui::Page::Thermals),
+                ("processes", gui::Page::Processes),
+                ("system", gui::Page::System),
+            ];
+            let outdir = std::env::temp_dir().join("rstmog-smoke");
+            std::fs::create_dir_all(&outdir)?;
+            for (name, page) in pages {
+                let out = outdir.join(format!("{name}.png"));
+                headless::capture(&mut app, page, &out)
+                    .map_err(|e| anyhow::anyhow!("smoke page {name}: {e}"))?;
+                println!("smoke {name}: ok");
+            }
+            println!("smoke PASSED ({} pages)", pages.len());
+        }
         Some("--snapshot") => std::process::exit(snapshot()),
         Some("--") | None => gui::run()?,
         Some(other) => {
