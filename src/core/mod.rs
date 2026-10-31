@@ -6,4 +6,6 @@
 
 pub mod cpu;
 pub mod fs;
+pub mod loadavg;
+pub mod meminfo;
 pub mod ring;

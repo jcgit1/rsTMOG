@@ -19,6 +19,11 @@ fn line(text: &str) {
     let _ = writeln!(w, "{text}");
 }
 
+/// Indented detail line under a self-test check.
+fn detail(text: &str) {
+    line(&format!("      {text}"));
+}
+
 /// Parse every cpu row of a `/proc/stat` text. Returns aggregate ("cpu")
 /// first then per-core rows, in file order.
 fn cpu_rows(text: &str) -> Vec<core::cpu::CpuJiffies> {
@@ -57,6 +62,50 @@ fn self_test() -> i32 {
                     rows[0].name
                 ));
             }
+            Ok(())
+        })(),
+    );
+
+    check(
+        "meminfo parses",
+        (|| {
+            let m = core::meminfo::collect(Path::new("/"))?;
+            if m.mem_total == 0 {
+                return Err("MemTotal parsed as 0".into());
+            }
+            let pct = m.used_percent();
+            if !(0.0..=100.0).contains(&pct) {
+                return Err(format!("used% out of range: {pct}"));
+            }
+            detail(&format!(
+                "total {} GiB, used {:.1}% ({})",
+                m.mem_total / 1024 / 1024,
+                pct,
+                if m.mem_available.is_some() {
+                    "MemAvailable"
+                } else {
+                    "fallback avail"
+                }
+            ));
+            Ok(())
+        })(),
+    );
+
+    check(
+        "loadavg+uptime parse",
+        (|| {
+            let l = core::loadavg::collect_loadavg(Path::new("/"))?;
+            let up = core::loadavg::collect_uptime(Path::new("/"))?;
+            if up <= 0.0 {
+                return Err(format!("uptime {up} <= 0"));
+            }
+            detail(&format!(
+                "load {:.2} {:.2} {:.2}, up {:.1} h",
+                l.one,
+                l.five,
+                l.fifteen,
+                up / 3600.0
+            ));
             Ok(())
         })(),
     );

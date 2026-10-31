@@ -63,9 +63,9 @@ once the core API settles — splitting earlier churns more than it helps.
 ## Phase 2 — Metrics collectors (one checkbox = parser + fixtures + wiring
 into `--self-test`; hardware-dependent ones warn, never fail)
 
-- [ ] `core/meminfo.rs` — `/proc/meminfo` parse; used%; `MemAvailable`
+- [x] `core/meminfo.rs` — `/proc/meminfo` parse; used%; `MemAvailable`
       fallback (free+buffers+cached)
-- [ ] `core/loadavg.rs`, `core/uptime.rs`
+- [x] `core/loadavg.rs`, `core/uptime.rs`
 - [ ] `core/cpuinfo.rs` — model, topology, cpufreq sysfs tree (fake root in
       tests), governor/driver
 - [ ] `core/vmstat.rs` + `core/pressure.rs` (PSI some/full avg lines)
