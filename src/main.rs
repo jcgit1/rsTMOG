@@ -260,6 +260,50 @@ fn self_test() -> i32 {
         })(),
     );
 
+    // Hardware-dependent collectors: warn, never fail (per PLAN).
+    {
+        match core::hwmon::collect(Path::new("/")) {
+            readings if readings.is_empty() => line("warn  hwmon: no sensors readable"),
+            readings => {
+                let headline = core::hwmon::select_cpu_temp(&readings);
+                check("hwmon + cpu headline", Ok(()));
+                detail(&format!(
+                    "{} sensors; headline = {}",
+                    readings.len(),
+                    headline
+                        .map(|r| format!("{} {} {:.0}C", r.chip, r.label, r.value))
+                        .unwrap_or_else(|| "none (no cpu-family sensor)".into())
+                ));
+            }
+        }
+        match core::rapl::read_package_energy(Path::new("/")) {
+            Ok((e, m)) => detail(&format!("RAPL package energy_uj={e} max={m}")),
+            Err(_) => line("warn  rapl: no package domain (unprivileged or unsupported)"),
+        }
+        match core::rapl::collect_battery(Path::new("/")) {
+            Some(b) => detail(&format!(
+                "battery {}% {:?}",
+                b.percent.unwrap_or(0.0),
+                b.status.as_deref().unwrap_or("?")
+            )),
+            None => line("warn  battery: none present"),
+        }
+        match core::zfs::collect(Path::new("/")) {
+            Some(a) => detail(&format!(
+                "zfs arc {:.1} GiB (reclaimable {:.1} GiB)",
+                a.size as f64 / (1u64 << 30) as f64,
+                core::zfs::reclaimable(&a) as f64 / (1u64 << 30) as f64
+            )),
+            None => line("warn  zfs: no arcstats (module not loaded on this box)"),
+        }
+        let si = core::sysinfo::collect(Path::new("/"));
+        check("sysinfo", Ok(()));
+        detail(&format!(
+            "{} / {} {} / {}",
+            si.hostname, si.distro, si.release, si.machine
+        ));
+    }
+
     if failures == 0 {
         line("self-test PASSED");
         0

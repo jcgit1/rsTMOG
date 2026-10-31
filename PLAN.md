@@ -84,19 +84,23 @@ into `--self-test`; hardware-dependent ones warn, never fail)
 - [x] `core/netdev.rs` — `/proc/net/dev` rx/tx rates + wrap guard
       (RateTracker); `/sys/class/net/*` speed/operstate/mtu/mac +
       kind classification (lo/wifi/virtual-before-type/wired/other)
-- [ ] `core/hwmon.rs` — temps/fans/voltages, millidegree scaling, label
+- [x] `core/hwmon.rs` — temps/fans/voltages, millidegree scaling, label
       fallback, faulted-sensor skip + `select_cpu_temp()` priority
       (coretemp package → AMD Tctl/Tdie → ARM cpu_thermal → hottest core →
-      acpitz)
-- [ ] `core/battery.rs` + `core/rapl.rs` — both ACPI unit variants; RAPL
-      joule-delta with `max_energy_range_uj` wraparound (warn-only here:
-      unprivileged desktop, no battery)
+      acpitz; NEVER falls back to hottest — tested). Live: k10temp Tctl
+- [x] `core/battery.rs` + `core/rapl.rs` — both ACPI unit variants
+      (power_now/energy_now vs voltage×current/charge); RAPL joule-delta
+      with `max_energy_range_uj` wraparound + unknown-range refusal.
+      One module: `rapl.rs`. Live: battery 100% Full; RAPL unprivileged → warn
 - [ ] `core/gpu.rs` — NVML via nvml-wrapper: busy%, VRAM, clocks, power
       draw/limit; absent driver → dash values, no crash, no build dep
-- [ ] `core/sysinfo.rs` — uname, hostname, os-release, boot time
-- [ ] `core/zfs.rs` — `/proc/spl/kstat/zfs/arcstats`; ARC-aware memory:
-      reclaimable = size − c_min folded into cache/available (btop's
-      view); `mem_composition()` for the stacked bar. REQUIRED
+- [x] `core/sysinfo.rs` — uname-ish (proc/sys/kernel files), os-release,
+      boot time (now − uptime), uptime formatting
+- [x] `core/zfs.rs` — `/proc/spl/kstat/zfs/arcstats`; ARC-aware memory:
+      reclaimable = size − c_min folded into available (btop's view),
+      clamped; `mem_composition()` for the stacked bar, segments always
+      sum to total. REQUIRED. Fixture-driven: this box has no ZFS module,
+      the evildojo 89%-used incident is reproduced and fixed in tests
 - [ ] `core/settings.rs` — TOML in `dirs::config_dir()/rstmog/config.toml`;
       round-trip tests; unknown keys preserved or tolerated
 - [ ] Split workspace: `crates/tmog-core` (lib, zero GUI deps) +
