@@ -11,4 +11,5 @@ pub mod loadavg;
 pub mod meminfo;
 pub mod pressure;
 pub mod process;
+pub mod process_table;
 pub mod ring;
