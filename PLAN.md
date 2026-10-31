@@ -282,9 +282,9 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
 - [x] README rewritten (feature list, workspace layout, build/CI/CLI,
       desktop entry, headless capture); LICENSE (MIT, with the TMOG
       non-affiliation + evildojo attribution note)
-- [ ] Packaging pass on this box: release build (running now), `.desktop`
-      entry — done for the debug build and installed for this user;
-      re-run install-desktop.sh after the release build completes
+- [x] Packaging pass on this box: release build (30 s, self-test + smoke
+      green), `.desktop` + hicolor icon installed for this user with
+      Exec pointing at target/release/rstmog
 
 ## Deliberate non-goals (v1)
 
