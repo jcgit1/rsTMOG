@@ -169,11 +169,36 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot) {
         super::graph::graph_ui(ui, &m, 90.0);
         ui.add_space(8.0);
     }
-    ui.label(format!(
-        "{} cores ({} logical)",
-        s.sysinfo.as_ref().map(|_| s.per_core.len()).unwrap_or(0),
-        s.per_core.len()
-    ));
+    // topology + freq/governor header (live from sysfs; cheap files)
+    let root = std::path::Path::new("/");
+    if let Ok(ci) = tmog_core::cpuinfo::collect(root) {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} — {} threads, {} cores, {} socket(s)",
+                ci.model, ci.logical, ci.cores, ci.sockets
+            ))
+            .weak(),
+        );
+        if let Some(c0) = tmog_core::cpuinfo::present_cpus(root).first().copied() {
+            let f = tmog_core::cpuinfo::read_cpufreq(root, c0);
+            let mhz = |k: Option<u64>| {
+                k.map(|k| format!("{:.0} MHz", k as f64 / 1000.0))
+                    .unwrap_or_else(|| "-".into())
+            };
+            ui.label(
+                egui::RichText::new(format!(
+                    "cpu0 {}  min {}  max {}  governor {}  driver {}",
+                    mhz(f.cur_khz),
+                    mhz(f.min_khz),
+                    mhz(f.max_khz),
+                    f.governor.as_deref().unwrap_or("-"),
+                    f.driver.as_deref().unwrap_or("-"),
+                ))
+                .weak(),
+            );
+        }
+    }
+    ui.add_space(4.0);
     let cols = (s.per_core.len() as f32).sqrt().ceil().max(1.0) as usize;
     egui::Grid::new("cores")
         .num_columns(cols)
@@ -220,6 +245,57 @@ pub fn memory_ui(ui: &mut egui::Ui, s: &Snapshot) {
         gib(m.mem_total),
         m.used_percent().round()
     )));
+    // stacked composition bar: in-use / zfs-arc / cached / buffers / free
+    {
+        let (cs_in, cs_arc, cs_cache, cs_buf, cs_free) =
+            tmog_core::zfs::mem_composition(m, s.arc.as_ref());
+        let segs = [cs_in, cs_arc, cs_cache, cs_buf, cs_free];
+        let names = ["in use", "zfs arc", "cached", "buffers", "free"];
+        let colors = [
+            egui::Color32::from_rgb(200, 90, 90),
+            egui::Color32::from_rgb(120, 200, 220),
+            egui::Color32::from_rgb(110, 160, 230),
+            egui::Color32::from_rgb(150, 130, 210),
+            egui::Color32::from_rgb(90, 170, 110),
+        ];
+        let total = segs.iter().sum::<u64>().max(1) as f32;
+        let (_r, resp) =
+            ui.allocate_at_least(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
+        let rect = resp.rect;
+        let painter = ui.painter();
+        let mut x = rect.left();
+        for (i, (&val, (&name, &color))) in
+            segs.iter().zip(names.iter().zip(colors.iter())).enumerate()
+        {
+            let w = val as f32 / total * rect.width();
+            let r =
+                egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(w, rect.height()));
+            painter.rect_filled(r, 0.0, color);
+            if w > 42.0 {
+                painter.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    name,
+                    egui::FontId::proportional(10.0),
+                    egui::Color32::BLACK,
+                );
+            }
+            let _ = i;
+            x += w;
+        }
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(90)),
+            egui::StrokeKind::Inside,
+        );
+        ui.label(
+            egui::RichText::new("composition: in use / zfs arc / cached / buffers / free")
+                .small()
+                .weak(),
+        );
+    }
+    ui.add_space(4.0);
     egui::Grid::new("mem").num_columns(2).show(ui, |ui| {
         ui.label("available");
         ui.label(gib(m.available_kib()));
@@ -268,9 +344,14 @@ pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 ui.label(d.name.clone());
                 ui.label(id.model.unwrap_or("-".into()));
                 ui.label(format!(
-                    "read {} M  write {} M",
+                    "read {} M  write {} M  busy {}",
                     d.read_bytes / 1_000_000,
-                    d.write_bytes / 1_000_000
+                    d.write_bytes / 1_000_000,
+                    match id.rotational {
+                        Some(1) => "HDD".to_string(),
+                        Some(_) => "SSD".to_string(),
+                        None => "?".to_string(),
+                    }
                 ));
                 ui.end_row();
                 if let Some((_, rh, wh)) = s.hist_disk.iter().find(|e| e.0 == d.name) {
@@ -292,6 +373,26 @@ pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
 
 pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
     ui.heading("Network");
+    let tot_rx: u64 = s
+        .nets
+        .iter()
+        .filter(|n| n.name != "lo")
+        .map(|n| n.rx_bytes)
+        .sum();
+    let tot_tx: u64 = s
+        .nets
+        .iter()
+        .filter(|n| n.name != "lo")
+        .map(|n| n.tx_bytes)
+        .sum();
+    ui.label(
+        egui::RichText::new(format!(
+            "totals  rx {} MB  tx {} MB",
+            tot_rx / 1_000_000,
+            tot_tx / 1_000_000
+        ))
+        .weak(),
+    );
     egui::Grid::new("net")
         .num_columns(4)
         .spacing([18.0, 4.0])
@@ -302,7 +403,12 @@ pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 }
                 let id = tmog_core::netdev::read_identity(std::path::Path::new("/"), &n.name);
                 ui.label(n.name.clone());
-                ui.label(format!("{:?}", id.kind(std::path::Path::new("/"))));
+                let speed = id.speed_mbps.map(|s| format!("{s}M")).unwrap_or_default();
+                let mac = id.mac.clone().unwrap_or_default();
+                ui.label(format!(
+                    "{:?} {speed} {mac}",
+                    id.kind(std::path::Path::new("/"))
+                ));
                 ui.label(format!("rx {} MB", n.rx_bytes / 1_000_000));
                 ui.label(format!("tx {} MB", n.tx_bytes / 1_000_000));
                 ui.end_row();

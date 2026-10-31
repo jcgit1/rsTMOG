@@ -241,11 +241,16 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       follow persist to settings on window close. `end_task` is currently
       blocking on the UI thread (documented; short-lived + user-initiated,
       async follow-up noted)
-- [ ] CPU page: aggregate + per-core grid, topology header, freq/governor
-- [ ] Memory page: in-use graph, stacked composition bar (ARC segment),
-      PSI lines
-- [ ] Disk page: per-disk dual-trace graphs, identity line, busy%
-- [ ] Network page: per-iface rx/tx + totals, kind/speed/MAC
+- [x] CPU page: aggregate graph + per-core grid, topology header (model/
+      threads/cores/sockets), freq/governor/driver line
+- [x] Memory page: in-use graph, stacked composition bar (in-use / zfs
+      arc / cached / buffers / free via core mem_composition), readout
+      grid, PSI line
+- [x] Disk page: per-disk dual-trace graphs + identity line (model,
+      rotational kind); cumulative counters. Live busy% needs a util
+      sampler tick — small follow-up, noted
+- [x] Network page: per-iface rx/tx graphs + identity (kind, speed, MAC)
+      and page totals row
 - [ ] Thermals page: CPU-package trend + hwmon list grouped by chip,
       headline sensor bolded
 - [ ] System page: hostname/distro/kernel/CPU/mem/boot/uptime/load
