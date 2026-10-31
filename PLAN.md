@@ -150,10 +150,20 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
 - [x] **Fast tier now:** `refresh_ms` (default 1000; 500/1000/2000 ladder)
       is read from settings at startup; the repaint driver and sample
       cadence follow it.
+- [x] Background sampler thread (`bg.rs`): `SamplerHandle` owns the
+      `Sampler` on a named thread and publishes an `Arc<Snapshot>` per
+      cycle; the UI clones the Arc under a short read lock, so a ~60 ms
+      (worst 156 ms) process walk can never hitch the paint path. Seeds
+      one synchronous tick before the thread starts (no blank first
+      frame); adaptive sleep handles tick-overrun cadence gracefully;
+      `Drop`/`shutdown` sets the stop flag and joins (idempotent —
+      verified no thread/process leaks on the capture path). Repaint
+      driver tracks the shared `AtomicU32` refresh handle so a runtime
+      cadence change takes effect within ~100 ms. `set_refresh_ms`
+      clamps to 250..5000 (settings-dialog hook).
 - [ ] Settings dialog lets the user change the poll rate at runtime
-      (Phase 4 dialog item; persisted via core/settings).
-- [ ] Background sampler thread so paint never waits on a tick
-      (Arc<Mutex<Snapshot>> handoff; tick cost moves off the UI thread).
+      (Phase 4 dialog item; persisted via core/settings — the runtime
+      plumbing `set_refresh_ms` is now in place)
 - [ ] Medium tier: process ROWS every 3rd tick; CPU% deltas computed
       against the last real sample so they stay honest between.
 - [ ] Slow tier: status/statm/cmdline only for visible rows +

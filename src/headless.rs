@@ -15,7 +15,7 @@ pub fn capture(app: &mut App, page: crate::gui::Page, out: &std::path::Path) -> 
     let scale = 1.0f32;
     let (w, h) = (1100u32, 700u32);
     let ctx = egui::Context::default();
-    ctx.set_visuals(egui::Visuals::dark());
+    ctx.set_visuals(crate::gui::theme_visuals(app.theme()));
     let mut raw = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,

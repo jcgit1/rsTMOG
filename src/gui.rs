@@ -4,8 +4,10 @@
 pub mod graph;
 pub mod pages;
 
-use crate::sampler::Sampler;
+use crate::bg::SamplerHandle;
+use crate::core::settings::Settings;
 use eframe::egui;
+use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Page {
@@ -20,45 +22,88 @@ pub enum Page {
 }
 
 pub struct App {
-    pub sampler: Sampler,
+    sampler: SamplerHandle,
+    /// latest snapshot for the current frame; the UI thread never blocks
+    /// on a tick (the sampler thread publishes a fresh Arc each cycle)
+    snap: Arc<crate::sampler::Snapshot>,
     page: Page,
-    refresh_ms: u32,
+    settings: Settings,
+    applied_theme: Option<String>,
     timer_started: bool,
 }
 
 impl App {
     pub fn new() -> Self {
-        let mut sampler = Sampler::new();
-        sampler.tick(); // seed tick
         // user-configurable cadence (Phase 4 settings dialog; TOML today)
-        let refresh_ms = match crate::core::settings::load(&crate::core::settings::default_path()) {
-            Ok(s) => s.refresh_ms,
+        let settings = match crate::core::settings::load(&crate::core::settings::default_path()) {
+            Ok(s) => s,
             Err(e) => {
                 eprintln!("settings: {e} (using defaults)");
-                crate::core::settings::Settings::default().refresh_ms
+                Settings::default()
             }
         };
+        let sampler = SamplerHandle::start(settings.refresh_ms);
+        let snap = sampler.snapshot();
         App {
             sampler,
+            snap,
             page: Page::Summary,
-            refresh_ms,
+            settings,
+            applied_theme: None,
             timer_started: false,
         }
     }
 
-    /// Repaint driver: one thread that requests a repaint every
-    /// refresh_ms until the window closes. Started on the first update
-    /// (when a `Context` exists).
+    /// Start the sampler at a fast cadence for headless capture (fills
+    /// history quickly). Not used by the real GUI.
+    pub fn new_for_capture(refresh_ms: u32) -> Self {
+        let sampler = SamplerHandle::start(refresh_ms);
+        let snap = sampler.snapshot();
+        App {
+            sampler,
+            snap,
+            page: Page::Summary,
+            settings: Settings::default(),
+            applied_theme: None,
+            timer_started: false,
+        }
+    }
+
+    /// The background sampler handle (capture waits on its tick counter).
+    pub fn sampler(&self) -> &SamplerHandle {
+        &self.sampler
+    }
+
+    /// Publish the latest snapshot into the frame slot before a capture.
+    pub fn pull_snapshot(&mut self) {
+        self.snap = self.sampler.snapshot();
+    }
+
+    /// Active theme name (for the headless renderer).
+    pub fn theme(&self) -> &str {
+        &self.settings.theme
+    }
+
+    /// Repaint driver: repaint at the sampler's cadence so the UI reflects
+    /// each published snapshot. The repaint period tracks the poll rate via
+    /// the shared refresh_ms handle (settings dialog can change it live).
     fn schedule(&mut self, ctx: &egui::Context) {
         if self.timer_started {
             return;
         }
         self.timer_started = true;
-        let ms = self.refresh_ms;
         let rt = ctx.clone();
+        let refresh = self.sampler.refresh_handle();
         std::thread::spawn(move || {
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+                let ms = refresh.load(std::sync::atomic::Ordering::Relaxed) as u64;
+                // sleep in small steps so a cadence change takes effect quickly
+                let step = std::time::Duration::from_millis(ms.min(100));
+                let mut waited = 0u64;
+                while waited < ms {
+                    std::thread::sleep(step);
+                    waited += step.as_millis() as u64;
+                }
                 rt.request_repaint();
                 if rt.input(|i| i.viewport().close_requested()) {
                     break;
@@ -70,10 +115,16 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // apply the persisted theme (TMOG's phosphor palettes are a
+        // signature feature); only re-set when the name actually changes
+        if self.applied_theme.as_deref() != Some(self.settings.theme.as_str()) {
+            ctx.set_visuals(theme_visuals(&self.settings.theme));
+            self.applied_theme = Some(self.settings.theme.clone());
+        }
         self.schedule(ctx);
-        // sample once per update, driven by repaint timer
-        self.sampler.tick();
-        let snap = &self.sampler.snapshot;
+        // grab the latest snapshot published by the sampler thread
+        self.snap = self.sampler.snapshot();
+        let snap = &*self.snap;
 
         egui::SidePanel::left("nav")
             .default_width(130.0)
@@ -119,17 +170,58 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let snap = &self.sampler.snapshot;
+            let snap = &*self.snap;
             render_central(ui, snap, self.page);
         });
     }
 }
 
+/// Map a theme name to egui Visuals. Dark is egui's default; the phosphor
+/// palettes tint the window bg + selection to evoke a CRT (TMOG signature).
+pub fn theme_visuals(name: &str) -> egui::Visuals {
+    use egui::Color32;
+    let mut v = match name {
+        "light" => egui::Visuals::light(),
+        "mono" => {
+            let mut v = egui::Visuals::dark();
+            let g = Color32::from_gray(200);
+            v.widgets.inactive.fg_stroke.color = g;
+            v.widgets.hovered.weak_bg_fill = g.linear_multiply(0.25);
+            v.widgets.active.weak_bg_fill = g.linear_multiply(0.4);
+            v.selection.stroke.color = g;
+            v.extreme_bg_color = Color32::BLACK;
+            v
+        }
+        "green" | "amber" | "blue" => {
+            let mut v = egui::Visuals::dark();
+            let (accent, panel) = match name {
+                "green" => (Color32::from_rgb(60, 255, 120), Color32::from_rgb(6, 16, 8)),
+                "amber" => (Color32::from_rgb(255, 176, 60), Color32::from_rgb(20, 13, 4)),
+                _ /* blue */ => (Color32::from_rgb(90, 180, 255), Color32::from_rgb(4, 10, 20)),
+            };
+            v.panel_fill = panel;
+            v.window_fill = panel;
+            v.extreme_bg_color = Color32::from_rgb(2, 6, 3);
+            v.widgets.inactive.fg_stroke.color = accent;
+            v.widgets.noninteractive.fg_stroke.color = accent;
+            v.widgets.hovered.weak_bg_fill = accent.linear_multiply(0.25);
+            v.widgets.active.weak_bg_fill = accent.linear_multiply(0.4);
+            v.selection.stroke.color = accent;
+            v.hyperlink_color = accent;
+            v
+        }
+        _ => egui::Visuals::dark(),
+    };
+    // keep panel/window fills consistent with dark_mode flag
+    v.dark_mode = name != "light";
+    v
+}
+
 /// Render one page's central panel into `ctx` (used by the window and by
-/// the headless capture). Ticks the sampler once first.
+/// the headless capture).
 pub fn render_page(ctx: &egui::Context, app: &mut App, page: Page) {
     egui::CentralPanel::default().show(ctx, |ui| {
-        let snap = &app.sampler.snapshot;
+        let snap = &*app.snap;
         render_central(ui, snap, page);
     });
 }

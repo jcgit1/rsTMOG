@@ -6,6 +6,7 @@
 
 pub mod core;
 
+mod bg;
 mod gui;
 mod headless;
 mod sampler;
@@ -397,13 +398,23 @@ fn main() -> anyhow::Result<()> {
                 .next()
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::path::PathBuf::from("/tmp/rstmog-capture.png"));
-            let mut app = gui::App::new();
-            // Tick repeatedly so the history graphs accumulate a visible
-            // trace (~60 samples at 100 ms = one simulated minute).
-            for _ in 0..60 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                app.sampler.tick();
+            let mut app = gui::App::new_for_capture(50);
+            // The sampler runs on its own thread; wait until enough
+            // history samples have accumulated for the graphs to be
+            // meaningful (~60 ticks), then capture the published snapshot.
+            let want = 60u64;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            loop {
+                if app.sampler().snapshot().tick >= want {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "sampler stalled before capture"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
+            app.pull_snapshot();
             headless::capture(&mut app, page, &out)?;
             println!("captured {page:?} -> {}", out.display());
         }
