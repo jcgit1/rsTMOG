@@ -34,6 +34,8 @@ pub struct App {
     clipboard_text: Option<String>,
     persisted: bool,
     applied_theme: Option<String>,
+    /// system tray (None on sessions without tray support)
+    tray: Option<crate::traythread::TrayHandle>,
     timer_started: bool,
 }
 
@@ -58,7 +60,48 @@ impl App {
             clipboard_text: None,
             persisted: false,
             applied_theme: None,
+            tray: None,
             timer_started: false,
+        }
+    }
+
+    /// Build the app with the system tray wired in (real GUI only).
+    pub fn with_tray(
+        _cc: &eframe::CreationContext<'_>,
+        tray: Option<crate::traythread::TrayHandle>,
+    ) -> Self {
+        let mut app = App::new();
+        app.tray = tray;
+        if let Some(tray) = &app.tray {
+            tray.set_refresh(app.settings.refresh_ms);
+        }
+        app
+    }
+
+    /// Drain tray menu events into app behavior.
+    fn handle_tray_events(&mut self, ctx: &egui::Context) {
+        let Some(tray) = &self.tray else { return };
+        while let Some(ev) = tray.try_event() {
+            match ev {
+                crate::icons::TrayEvent::OpenOrShow => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                crate::icons::TrayEvent::Quit => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                crate::icons::TrayEvent::SetRefresh(ms) => {
+                    self.sampler.set_refresh_ms(ms);
+                    self.settings.refresh_ms = ms;
+                    if let Err(e) = crate::core::settings::save(
+                        &crate::core::settings::default_path(),
+                        &self.settings,
+                    ) {
+                        eprintln!("settings save: {e}");
+                    }
+                    tray.set_refresh(ms);
+                }
+            }
         }
     }
 
@@ -77,6 +120,7 @@ impl App {
             clipboard_text: None,
             persisted: false,
             applied_theme: None,
+            tray: None,
             timer_started: false,
         }
     }
@@ -134,6 +178,8 @@ impl eframe::App for App {
             self.applied_theme = Some(self.settings.theme.clone());
         }
         self.schedule(ctx);
+        // tray menu events (Open / refresh-rate / Quit)
+        self.handle_tray_events(ctx);
         // place any pending clipboard text (Copy command line)
         if let Some(text) = self.clipboard_text.take() {
             ctx.copy_text(text);
@@ -311,10 +357,29 @@ impl App {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    let app = App::new();
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 700.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 700.0])
+            // window titlebar + DE taskbar icon (theme-aware "T")
+            .with_icon(crate::icons::window_icon(&app.settings.theme))
+            // X11/Wayland desktop-file matching name (see packaging/)
+            .with_app_id("rstmog")
+            .with_title("rsTMOG — Task Manager OG"),
         ..Default::default()
     };
-    eframe::run_native("rsTMOG", opts, Box::new(|_cc| Ok(Box::new(App::new()))))
-        .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+    eframe::run_native(
+        "rsTMOG",
+        opts,
+        Box::new(|cc| {
+            // System tray with Open / refresh-rate / Quit menu. Best-effort:
+            // platforms without a tray (some Wayland setups) continue without.
+            let tray = crate::traythread::spawn("dark", "rsTMOG", 1000);
+            if tray.is_none() {
+                eprintln!("tray: unavailable on this desktop session");
+            }
+            Ok(Box::new(App::with_tray(cc, tray)))
+        }),
+    )
+    .map_err(|e| anyhow::anyhow!("eframe: {e}"))
 }

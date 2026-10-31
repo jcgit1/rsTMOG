@@ -9,7 +9,9 @@ pub mod core;
 mod bg;
 mod gui;
 mod headless;
+pub mod icons;
 mod sampler;
+mod traythread;
 
 use std::path::Path;
 

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=rsTMOG
+GenericName=Task Manager
+Comment=Task Manager OG, rewritten in Rust
+Exec=rstmog
+Icon=rstmog
+Terminal=false
+Categories=System;Monitor;Utility;
+Keywords=task;manager;process;monitor;cpu;memory;
+StartupNotify=false

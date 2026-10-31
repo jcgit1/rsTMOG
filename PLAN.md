@@ -151,6 +151,35 @@ into `--self-test`; hardware-dependent ones warn, never fail)
       unprivileged callers within RLIMIT_NICE + own-nice floor; tests
       predict, not assume EPERM
 
+## Phase 4.9 — Icons (user-supplied package, 2026-10-31)
+
+Icon package (glossy ice-blue serif "T", light + dark variants, 16–1024 px
+PNGs + SVGs) lives in `assets/icons/{light,dark}/`.
+
+- [x] Window/taskbar icon: theme-aware (`ViewportBuilder::with_icon`,
+      64 px); dark/light picked from the persisted theme, falling back to
+      the OS `dark-light` preference
+- [x] System tray (`tray-icon` + GTK on a dedicated thread — Linux needs
+      gtk::init + a GTK main loop on the owning thread; muda items are Rc/
+      !Send so the handle stays on the tray thread): icon + tooltip +
+      menu Open / Refresh rate 500|1000|2000 ms (checked = current) /
+      Quit. Events bridge to the eframe loop over channels; Open shows+
+      focuses, Quit closes (persisting settings), rate changes flow
+      through sampler.set_refresh_ms + settings save + tray tick sync.
+      Honest degradation: no StatusNotifier/GTK → app runs with no tray
+      (spawn returns None within 2 s).
+- [x] Taskbar identity: `with_app_id("rstmog")` + full title
+      "rsTMOG — Task Manager OG" so KDE matches the .desktop entry
+- [x] packaging/rstmog.desktop (Name/GenericName/Categories/Keywords +
+      Icon=rstmog) and packaging/install-desktop.sh (installs the 256 px
+      icon to hicolor + the .desktop with the absolute Exec path;
+      verified installed for this user). Upstream README note honored:
+      desktop icon does NOT auto-switch with the DE theme — we ship the
+      dark variant
+- Note: tray-icon built with default-features=false (libxdo off — lib not
+  on this box, accelerators unused). gtk/glib pinned to the 0.18 series
+  matching muda 0.16.
+
 ## Phase 4.5 — Polling cost (user-flagged 2026-10-31)
 
 Measured on llm (debug build): full `tick()` = ~62 ms avg / 156 ms worst
