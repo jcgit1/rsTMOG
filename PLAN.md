@@ -97,8 +97,8 @@ into `--self-test`; hardware-dependent ones warn, never fail)
       memory clocks, power draw, temp; every field Option (unsupported
       per-GPU fields degrade to dashes, absent driver -> Nvml::new() ==
       None, never panics). Live: RTX 5090 Laptop GPU read fine.
-      (power limit via nvml power-limit APIs: deferred, needs
-      legacy-functions feature decision)
+      Power limit: resolved — nvml-wrapper `legacy-functions` enabled,
+      `power_limit_w` collected and shown on Summary (with power draw)
 - [x] `core/sysinfo.rs` — uname-ish (proc/sys/kernel files), os-release,
       boot time (now − uptime), uptime formatting
 - [x] `core/zfs.rs` — `/proc/spl/kstat/zfs/arcstats`; ARC-aware memory:
@@ -148,7 +148,8 @@ into `--self-test`; hardware-dependent ones warn, never fail)
       honored: set_nice reports whatever the kernel says, no EPERM
       assumption.
 - [x] end_task: SIGTERM → bounded wait → SIGKILL — DONE but *blocking*
-      (spec said async; async remains an open follow-up). Force kill done.
+      (spec said async; async landed later — see Phase 5 "async end_task").
+      Force kill done.
 - [x] suspend/resume (SIGSTOP/SIGCONT), verified via state polling
 - [x] renice get/set — evildojo lesson honored: no EPERM assumption, the
       kernel verdict is reported via errno (lowering succeeds for
@@ -253,9 +254,9 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       cmdline via egui clipboard), zombie rows red / stopped amber.
       Pending actions execute via core::actions in App::run_proc_action;
       failures go to stderr (a toast is a Phase 5 nicety). Sort/tree/
-      follow persist to settings on window close. `end_task` is currently
-      blocking on the UI thread (documented; short-lived + user-initiated,
-      async follow-up noted)
+      follow persist to settings on window close. `end_task` now runs on
+      a short-lived worker thread (results via channel -> footer toast);
+      see Phase 5)
 - [x] CPU page: aggregate graph + per-core grid, topology header (model/
       threads/cores/sockets), freq/governor/driver line
 - [x] CPU page: click-a-core → "tasks last seen on CPU N" panel —
@@ -267,17 +268,14 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       arc / cached / buffers / free via core mem_composition), readout
       grid, PSI line
 - [x] Disk page: per-disk dual-trace graphs + identity line (model,
-      rotational kind); cumulative counters. Live busy% needs a util
-      sampler tick — small follow-up, noted
+      rotational kind) + live busy% (Phase 5)
 - [x] Network page: per-iface rx/tx graphs + identity (kind, speed, MAC)
       and page totals row
-- [x] Thermals page: CPU-package headline + hwmon list grouped by chip,
-      temps/fans/voltages (landed in the v1 shell; the package *trend
-      graph* rides the hist_temp series already in the Summary page —
-      moving a copy onto Thermals is a quick follow-up)
-      headline sensor bolded (partially: headline shown; bold-in-list TODO)
-- [x] System page: hostname/distro/kernel/arch/CPU/mem (landed in the
-      v1 shell; boot-time line is the remaining nit)
+- [x] Thermals page: CPU-package headline + trend graph + hwmon list
+      grouped by chip, temps/fans/voltages; headline sensor bolded
+      in-list (Phase 5)
+- [x] System page: hostname/distro/kernel/arch/CPU/mem + boot-time
+      line (Phase 5)
 - [x] Disks/Network: graphs span the full window width (was capped by the
       column layout; the trace now claims all available width)
 - [x] Themes: dark default + phosphor green/amber/blue + mono + light
@@ -289,13 +287,13 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
 
 - [x] `--smoke`: headless run of every page through the real egui pass +
       software rasterizer (see below), exits non-zero on failure
-- [~] Perf: measured (release, llm, ~735 procs): tick avg ~44 ms,
-      worst ~143 ms. The <2 ms budget was unrealistic for a full walk —
-      the background-thread design already keeps it off the paint path;
-      real fix is the medium/slow polling tiers (landed — see Phase 4.5),
-      tick avg ~44 ms full / ~12 ms with tiers). No allocations
-      added to the paint path beyond egui's own (snapshots are Arc
-      clones)
+- [x] Perf: re-measured (release, llm, ~768 procs, tiers active):
+      avg 11.2 ms / worst 34.8 ms across 20 ticks; row-ticks avg
+      31.6 ms, light ticks avg 0.23 ms. The <2 ms budget was unrealistic
+      for a full walk — the background thread keeps even row ticks off
+      the paint path, and the tiers deliver the 4x average reduction.
+      No allocations added to the paint path beyond egui's own
+      (snapshots are Arc clones)
 - [x] CI gate: `scripts/ci.sh` (fmt --check, clippy -D warnings, tests,
       self-test, --smoke of all 8 pages, cargo-deny licenses/sources
       with a curated deny.toml, cargo-audit as a warning — 7 open
@@ -309,8 +307,33 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       green), `.desktop` + hicolor icon installed for this user with
       Exec pointing at target/release/rstmog
 
+## Phase 6 — v1 finish pass (2026-11-01)
+
+- [x] Async end_task: SIGTERM→grace→SIGKILL moved off the UI thread to a
+      short-lived `rstmog-endtask` worker; result returns over a crossbeam
+      channel. No post-exit escalation possible (worker dies with the app)
+- [x] Footer toasts for process actions (success green / errno red, 4 s
+      fade) — replaces the stderr-only failure path
+- [x] Disks page live busy%: per-disk util from busy_ms deltas over real
+      elapsed time (core::diskstats::util_percent); first sample = dash
+- [x] System page boot-time line: "booted <Thu=0 weekday> YYYY-MM-DD
+      HH:MM" via Hinnant civil_from_days (no chrono); leap-boundary tests
+- [x] Thermals: headline CPU sensor bolded in the hwmon list
+- [x] CPU page: core selection is now double-click (single click =
+      transient preview + task-count hint; double-click commits the
+      panel; committed/previewed core gets a selection outline).
+      Hover text and tip updated accordingly
+- [x] Summary: GPU row now shows power draw and limit (W)
+- [x] CI: fmt/clippy/tests/self-test/smoke/deny — PASSED (110 tests)
+
 ## Deliberate non-goals (v1)
 
-Windows/macOS; Services/Users pages (no libsystemd/D-Bus); internet
-benchmark; disk-space scanner; ncurses TUI (maybe later — core is
+macOS; Services/Users pages (no libsystemd/D-Bus); internet benchmark;
+disk-space scanner; ncurses TUI (maybe later — core is
 frontend-agnostic by design).
+
+Windows: curiosity port, NOT a v1 goal. The `platform.rs` Collector
+seam + `windows.rs`/`linux.rs` split + `TerminateProcess` actions are
+parked on `wip/win-port` (pushed to both remotes); `windows-build` is
+the live branch. No Windows CI, no Windows testing — the module is
+cfg-gated so Linux builds never compile it.

@@ -116,10 +116,16 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                     _ => "-".into(),
                 };
                 ui.label(format!(
-                    "{} — {} busy, {}",
+                    "{} — {} busy, {}{}{}",
                     g.name,
                     dash(g.busy_percent, "%"),
-                    mem
+                    mem,
+                    g.power_draw_w
+                        .map(|w| format!(", {:.0} W", w))
+                        .unwrap_or_default(),
+                    g.power_limit_w
+                        .map(|w| format!(" / {:.0} W limit", w))
+                        .unwrap_or_default(),
                 ));
                 ui.end_row();
             }
@@ -206,16 +212,18 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
     // (no popup, no modal, no first-run state to persist)
     if core_panel.is_none() {
         ui.label(
-            egui::RichText::new("tip: click any core bar to list tasks last seen running on it")
+            egui::RichText::new("tip: double-click any core bar to list tasks running on it")
                 .weak()
                 .italics()
                 .size(11.0),
         );
     }
-    // per-core grid: clickable — selecting a core opens the "tasks seen
-    // on this core" panel (attribution is approximate; see below)
+    // per-core grid: single-click = transient preview (highlight only),
+    // double-click = commit the "tasks on this core" panel. Attribution
+    // is approximate; see the panel's own disclaimer.
     let cols = (s.per_core.len() as f32).sqrt().ceil().max(1.0) as usize;
-    let mut clicked: Option<usize> = None;
+    let mut activated: Option<usize> = None; // double-click -> toggle panel
+    let mut preview: Option<usize> = None; // single-click -> highlight
     let mut clear_sel = false;
     egui::Grid::new("cores")
         .num_columns(cols)
@@ -232,23 +240,46 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
                     .desired_width(110.0);
                 let resp = ui
                     .add(bar)
-                    .on_hover_text("click: tasks last seen on this core");
+                    .on_hover_text("double-click: tasks running on this core");
                 // make the bar respond to clicks (ProgressBar is hover-only)
                 let resp = resp.interact(egui::Sense::click());
-                if resp.clicked() {
-                    clicked = Some(i);
+                if resp.double_clicked() {
+                    activated = Some(i);
+                } else if resp.clicked() {
+                    preview = Some(i);
+                }
+                // highlight: the committed panel's core, else a preview click
+                let hot = activated.or(preview).or(core_panel) == Some(i);
+                if hot {
+                    ui.painter().rect_stroke(
+                        resp.rect,
+                        2.0,
+                        egui::Stroke::new(1.5_f32, ui.visuals().selection.stroke.color),
+                        egui::epaint::StrokeKind::Outside,
+                    );
                 }
                 if (i + 1) % cols == 0 {
                     ui.end_row();
                 }
             }
         });
-    if let Some(i) = clicked {
+    if let Some(i) = activated {
         core_panel = if core_panel == Some(i) {
             None // toggle off
         } else {
             Some(i)
         };
+    }
+    // a single-click preview that isn't the open core shows a one-line
+    // hint instead of jumping straight into the panel
+    if let Some(i) = preview.filter(|p| *p != core_panel.unwrap_or(usize::MAX)) {
+        let n = s.core_usage.get(&(i as u32)).map(|v| v.len()).unwrap_or(0);
+        ui.label(
+            egui::RichText::new(format!(
+                "CPU {i}: {n} task(s) last seen here — double-click to open"
+            ))
+            .weak(),
+        );
     }
     if core_panel.is_some() && ui.button("close core view").clicked() {
         clear_sel = true;
