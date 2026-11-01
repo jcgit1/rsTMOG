@@ -194,13 +194,14 @@ impl GraphModel {
             }
         }
 
-        // traces
+        // traces — NaN marks a missing sample (a tick whose read failed):
+        // excluded from the polyline, which leaves a visible gap.
         let (t0, t1) = ticks;
         for tr in &self.traces {
             let pts: Vec<egui::Pos2> = tr
                 .samples
                 .iter()
-                .filter(|(t, _)| *t >= t0 && *t <= t1)
+                .filter(|(t, v)| *t >= t0 && *t <= t1 && v.is_finite())
                 .map(|(t, v)| window_to_ui(rect, *t, *v, ticks, y_max))
                 .collect();
             if pts.len() >= 2 {

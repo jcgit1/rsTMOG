@@ -400,7 +400,8 @@ impl Sampler {
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
 
-        let push = |hist: &mut Vec<(u64, f64)>, v: f64| {
+        let push = |hist: &mut Vec<(u64, f64)>, v: Option<f64>| {
+            let v = v.unwrap_or(f64::NAN);
             hist.push((t, v));
             if hist.len() > HIST_LEN {
                 let excess = hist.len() - HIST_LEN;
@@ -410,17 +411,20 @@ impl Sampler {
         // graph widgets want a little scroll margin; the page picks the
         // visible window, HIST_LEN is just the retention cap.
         if let Some(a) = self.snapshot.aggregate {
-            push(&mut self.snapshot.hist_cpu, a);
+            push(&mut self.snapshot.hist_cpu, Some(a));
         }
         if let Some(ref m) = self.snapshot.mem_arc_adjusted {
-            push(&mut self.snapshot.hist_mem, m.used_percent());
+            push(&mut self.snapshot.hist_mem, Some(m.used_percent()));
         }
         if let Some(ref ct) = self.snapshot.cpu_temp {
-            push(&mut self.snapshot.hist_temp, ct.value);
+            push(&mut self.snapshot.hist_temp, Some(ct.value));
         }
-        // GPU busy % (lazy-allocated: stays None when there is no NVML)
-        if let Some(g) = self.snapshot.gpu.as_ref().and_then(|g| g.busy_percent) {
-            push(self.snapshot.hist_gpu.get_or_insert_with(Vec::new), g);
+        // GPU busy %: push an explicit None gap when NVML is present but a
+        // tick's utilization read failed (get_or_insert so the series
+        // starts lazily when a GPU exists).
+        if self.nvml.is_some() {
+            let busy = self.snapshot.gpu.as_ref().and_then(|g| g.busy_percent);
+            push(self.snapshot.hist_gpu.get_or_insert_with(Vec::new), busy);
         }
 
         // disk rates (physical candidates only, matching the page filter)

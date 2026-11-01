@@ -26,6 +26,7 @@ fn hist_model(
         .iter()
         .filter(|(t, _)| *t >= t0)
         .map(|(_, v)| *v)
+        .filter(|v| v.is_finite())
         .fold(0.0f64, f64::max);
     m.scale.observe(mx);
     m

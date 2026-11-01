@@ -374,6 +374,11 @@ impl eframe::App for App {
                         msg,
                     );
                 }
+                // build version pinned to the right edge (what the friend
+                // asks about when a bug report comes in)
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak(format!("v{}", env!("CARGO_PKG_VERSION")));
+                });
             });
         });
 
