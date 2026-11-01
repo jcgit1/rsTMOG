@@ -106,7 +106,16 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
             }
             if let Some(t) = &s.cpu_temp {
                 ui.label("Temp");
-                ui.label(format!("{:.0}°C  ({})", t.value, t.label));
+                // CPU package temp, plus the GPU temp on the same line:
+                // separated with a divider so both are readable but
+                // clearly distinct readings.
+                let gpu_part = s
+                    .gpu
+                    .as_ref()
+                    .and_then(|g| g.temp_c)
+                    .map(|gt| format!("   |   GPU {:.0}°C", gt))
+                    .unwrap_or_default();
+                ui.label(format!("{:.0}°C  ({}){}", t.value, t.label, gpu_part));
                 ui.end_row();
             }
             if let Some(g) = &s.gpu {
@@ -130,8 +139,11 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 ui.end_row();
             }
         });
-    ui.add_space(10.0);
-    if !s.hist_cpu.is_empty() || !s.hist_temp.is_empty() {
+    // GPU % history rides the same scrolling-graph widget as the CPU;
+    // only drawn when NVML is present (no GPU → no empty frame).
+    let gpu_hist = s.hist_gpu.as_deref().unwrap_or(&[]);
+    let show_graphs = !s.hist_cpu.is_empty() || !s.hist_temp.is_empty() || !gpu_hist.is_empty();
+    if show_graphs {
         ui.horizontal(|ui| {
             if !s.hist_cpu.is_empty() {
                 let m = hist_model(
@@ -143,6 +155,19 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 );
                 ui.vertical(|ui| {
                     ui.label("CPU %");
+                    super::graph::graph_ui(ui, &m, 90.0);
+                });
+            }
+            if !gpu_hist.is_empty() {
+                let m = hist_model(
+                    "gpu",
+                    egui::Color32::from_rgb(150, 120, 230),
+                    gpu_hist,
+                    60,
+                    true,
+                );
+                ui.vertical(|ui| {
+                    ui.label("GPU %");
                     super::graph::graph_ui(ui, &m, 90.0);
                 });
             }
