@@ -23,14 +23,16 @@ wgpu = { version = "27", default-features = false, features = ["vulkan", "gles"]
 # Icons: window/tray icon from assets/icons (package README guidance)
 image = { version = "0.25", default-features = false, features = ["png"] }
 dark-light = "2"
-# System tray (GTK/libappindicator on Linux). libxdo (accelerators) is off:
-# the tray menu here uses none and the lib isn't installed on this box.
+# System tray (GTK/libappindicator on Linux only). libxdo (accelerators)
+# is off: the tray menu here uses none and the lib isn't installed on this
+# box. On Windows tray-icon uses Shell_NotifyIcon — no extra deps.
 tray-icon = { version = "0.20", default-features = false }
+[target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 glib = "0.18"
 
 # Metrics core
-procfs = "0.18"          # /proc + /sys collectors (cpu, mem, diskstats, net, processes)
+procfs = "0.18"          # /proc + /sys collectors (Linux side of tmog-core)
 
 # Support
 anyhow = "1"

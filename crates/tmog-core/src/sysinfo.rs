@@ -3,7 +3,7 @@
 use crate::fs;
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SysInfo {
     pub hostname: String,
     /// sysname, e.g. "Linux"

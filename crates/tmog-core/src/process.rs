@@ -161,6 +161,57 @@ pub fn parse_cmdline(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// Split a Windows command line into argv following the MSVC rules the
+/// shell uses: a run of backslashes before `"` halves up (2n → n literal,
+/// 2n+1 → n literal + literal quote), quoted regions keep spaces.
+/// Pure function — unit-tested without a Windows target.
+pub fn parse_cmdline_windows(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut has_token = false;
+    let mut bs = 0usize;
+    for c in text.chars() {
+        match c {
+            '\\' => {
+                bs += 1;
+            }
+            '"' => {
+                cur.push_str(&"\\".repeat(bs / 2));
+                if bs % 2 == 1 {
+                    // odd run: literal quote, quote state unchanged
+                    cur.push('"');
+                    has_token = true;
+                } else {
+                    // even run (incl. 0): toggles quoting; a bare "" still
+                    // starts/ends a token so `"" ` survives as an empty arg
+                    in_quotes = !in_quotes;
+                    has_token = true;
+                }
+                bs = 0;
+            }
+            ' ' | '\t' if !in_quotes => {
+                bs = 0;
+                if has_token {
+                    out.push(std::mem::take(&mut cur));
+                    has_token = false;
+                }
+            }
+            _ => {
+                cur.push_str(&"\\".repeat(bs));
+                bs = 0;
+                cur.push(c);
+                has_token = true;
+            }
+        }
+    }
+    cur.push_str(&"\\".repeat(bs));
+    if has_token || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 /// Minimal `/etc/passwd` uid→name map (numeric-only UIDs; shell field
 /// ignored). Used to label the process table without libc NSS calls.
 pub fn parse_passwd(text: &str) -> HashMap<u32, String> {
@@ -386,5 +437,47 @@ mod tests {
         let mut pids = list_pids(&root);
         pids.sort_unstable();
         assert_eq!(pids, vec![2, 4321]);
+    }
+
+    // ---- Windows command-line splitting (pure; runs on any host) ----
+
+    #[test]
+    fn win_cmdline_plain_args() {
+        assert_eq!(
+            parse_cmdline_windows("a.exe one two"),
+            ["a.exe", "one", "two"]
+        );
+    }
+
+    #[test]
+    fn win_cmdline_quoted_path_with_spaces() {
+        assert_eq!(
+            parse_cmdline_windows("\"C:\\Program Files\\app.exe\" --path \"C:\\my dir\" x"),
+            ["C:\\Program Files\\app.exe", "--path", "C:\\my dir", "x"]
+        );
+    }
+
+    #[test]
+    fn win_cmdline_escaped_quotes_in_argument() {
+        // odd backslash run before a quote → literal quote, quoting unchanged
+        assert_eq!(parse_cmdline_windows("\"say \\\"hi\\\"\""), ["say \"hi\""]);
+    }
+
+    #[test]
+    fn win_cmdline_trailing_backslashes_before_closing_quote() {
+        assert_eq!(
+            parse_cmdline_windows("\"C:\\dir\\\\\" arg"),
+            ["C:\\dir\\", "arg"]
+        );
+    }
+
+    #[test]
+    fn win_cmdline_empty_quoted_argument_survives() {
+        assert_eq!(parse_cmdline_windows("a \"\" b"), ["a", "", "b"]);
+    }
+
+    #[test]
+    fn win_cmdline_tabs_split_like_spaces() {
+        assert_eq!(parse_cmdline_windows("a\tb  c"), ["a", "b", "c"]);
     }
 }
