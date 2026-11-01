@@ -146,45 +146,54 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
     let show_graphs = !s.hist_cpu.is_empty() || !s.hist_temp.is_empty() || !gpu_hist.is_empty();
     if show_graphs {
         ui.horizontal(|ui| {
-            if !s.hist_cpu.is_empty() {
-                let m = hist_model(
-                    "cpu",
-                    egui::Color32::from_rgb(80, 200, 120),
-                    &s.hist_cpu,
-                    60,
-                    true,
-                );
-                ui.vertical(|ui| {
-                    ui.label("CPU %");
-                    super::graph::graph_ui(ui, &m, 90.0);
-                });
-            }
-            if !gpu_hist.is_empty() {
-                let m = hist_model(
-                    "gpu",
-                    egui::Color32::from_rgb(150, 120, 230),
-                    gpu_hist,
-                    60,
-                    true,
-                );
-                ui.vertical(|ui| {
-                    ui.label("GPU %");
-                    super::graph::graph_ui(ui, &m, 90.0);
-                });
-            }
-            if !s.hist_temp.is_empty() {
-                let m = hist_model(
-                    "temp",
-                    egui::Color32::from_rgb(230, 140, 60),
-                    &s.hist_temp,
-                    60,
-                    false,
-                );
-                ui.vertical(|ui| {
-                    ui.label("\u{b0}C");
-                    super::graph::graph_ui(ui, &m, 90.0);
-                });
-            }
+            // fixed column width: `available_width` inside a horizontal
+            // row reports the whole remaining width, so a graph asked to
+            // fill it consumed the entire row and clipped every later
+            // column (this is why the GPU graph never showed). 350 px per
+            // column fits three side by side in the default window and
+            // scrolls horizontally past that.
+            let col = 350.0_f32;
+            ui.push_id("graphs", |ui| {
+                if !s.hist_cpu.is_empty() {
+                    let m = hist_model(
+                        "cpu",
+                        egui::Color32::from_rgb(80, 200, 120),
+                        &s.hist_cpu,
+                        60,
+                        true,
+                    );
+                    ui.vertical(|ui| {
+                        ui.label("CPU %");
+                        super::graph::graph_ui_w(ui, &m, 90.0, col);
+                    });
+                }
+                if !gpu_hist.is_empty() {
+                    let m = hist_model(
+                        "gpu",
+                        egui::Color32::from_rgb(150, 120, 230),
+                        gpu_hist,
+                        60,
+                        true,
+                    );
+                    ui.vertical(|ui| {
+                        ui.label("GPU %");
+                        super::graph::graph_ui_w(ui, &m, 90.0, col);
+                    });
+                }
+                if !s.hist_temp.is_empty() {
+                    let m = hist_model(
+                        "temp",
+                        egui::Color32::from_rgb(230, 140, 60),
+                        &s.hist_temp,
+                        60,
+                        false,
+                    );
+                    ui.vertical(|ui| {
+                        ui.label("\u{b0}C");
+                        super::graph::graph_ui_w(ui, &m, 90.0, col);
+                    });
+                }
+            });
         });
     }
 }

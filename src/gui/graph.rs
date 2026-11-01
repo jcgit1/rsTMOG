@@ -312,3 +312,69 @@ mod tests {
         assert!(g_first >= 14, "oldest kept {g_first}");
     }
 }
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    /// The real bug repro: three same-sized graph widgets in one row must
+    /// all paint (CPU + GPU + temp). Previously the GPU column drew its
+    /// frame but no trace — suspected egui id collision with the CPU graph
+    /// via allocate_exact_size.
+    #[test]
+    fn three_graphs_in_a_row_all_paint() {
+        let ctx = egui::Context::default();
+        let mk = |name: &str, c: egui::Color32, v: f64| {
+            let mut tr = Trace::new(name, c);
+            tr.samples = (0u64..60).map(|t| (t, v)).collect();
+            let mut m = GraphModel::new(vec![tr], 60, true);
+            m.newest_tick = 59;
+            m
+        };
+        let cpu = mk("cpu", egui::Color32::from_rgb(80, 200, 120), 15.0);
+        let gpu = mk("gpu", egui::Color32::from_rgb(150, 120, 230), 26.0);
+        let full_output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    for m in [&cpu, &gpu] {
+                        ui.vertical(|ui| {
+                            graph_ui(ui, m, 90.0);
+                        });
+                    }
+                });
+            });
+        });
+        let clipped = ctx.tessellate(full_output.shapes, 1.0);
+        // count filled quads tinted GPU-purple vs CPU-green
+        let mut purple = 0u32;
+        let mut green = 0u32;
+        for c in &clipped {
+            let mesh = match &c.primitive {
+                egui::epaint::Primitive::Mesh(m) => m,
+                egui::epaint::Primitive::Callback(_) => continue,
+            };
+            for v in mesh.vertices.iter() {
+                let (r, g, b, _a) = (v.color.r(), v.color.g(), v.color.b(), v.color.a());
+                if r > 120 && r < 180 && g > 90 && g < 150 && b > 200 {
+                    purple += 1;
+                }
+                if r < 110 && g > 160 && b > 80 && b < 160 {
+                    green += 1;
+                }
+            }
+        }
+        assert!(green > 0, "CPU trace vertices missing");
+        assert!(purple > 0, "GPU trace vertices missing (the bug)");
+    }
+}
+
+/// `graph_ui` with an explicit width (0 = fill available).
+pub fn graph_ui_w(ui: &mut egui::Ui, model: &GraphModel, height: f32, width: f32) {
+    let w = if width > 0.0 {
+        width
+    } else {
+        ui.available_width()
+    };
+    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(w, height), egui::Sense::hover());
+    model.paint(ui, rect);
+}
