@@ -560,6 +560,67 @@ fn main() -> anyhow::Result<()> {
                 d.len()
             });
         }
+        Some("--cores-probe") => {
+            // verify core_usage attribution: 3 row passes, then print
+            // per-core pid counts + a sample from the busiest core
+            let mut s = sampler::Sampler::new();
+            for _ in 0..6 {
+                s.tick();
+            }
+            let snap = &s.snapshot;
+            let mut tot = 0usize;
+            for c in 0..snap.per_core.len() {
+                tot += snap
+                    .core_usage
+                    .get(&(c as u32))
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+            }
+            let busy = snap
+                .core_usage
+                .iter()
+                .max_by_key(|(_, v)| v.len())
+                .map(|(c, v)| (*c, v.len()))
+                .unwrap_or((0, 0));
+            println!(
+                "cores={} attributed_pid_slots={tot} busiest_core={} ({} pids)",
+                snap.per_core.len(),
+                busy.0,
+                busy.1
+            );
+            if let Some(v) = snap.core_usage.get(&busy.0) {
+                let mut entries: Vec<(f64, bool, String)> = v
+                    .iter()
+                    .filter_map(|pid| {
+                        snap.procs.iter().find(|r| r.proc.pid == *pid).map(|r| {
+                            (
+                                r.cpu.unwrap_or(0.0),
+                                r.proc.is_kernel_thread(),
+                                r.proc.display_name(),
+                            )
+                        })
+                    })
+                    // userspace before kthreads; sorted by cpu below
+                    .filter(|(_, k, _)| !k)
+                    .collect();
+                entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                let mut names: Vec<String> =
+                    entries.into_iter().take(8).map(|(_, _, n)| n).collect();
+                if names.is_empty() {
+                    names = v
+                        .iter()
+                        .take(8)
+                        .filter_map(|pid| {
+                            snap.procs
+                                .iter()
+                                .find(|r| r.proc.pid == *pid)
+                                .map(|r| r.proc.display_name())
+                        })
+                        .collect();
+                }
+                println!("  sample: {}", names.join(", "));
+            }
+        }
         Some("--snapshot") => std::process::exit(snapshot()),
         Some("--") | None => gui::run()?,
         Some(other) => {

@@ -3,6 +3,7 @@
 
 use crate::sampler::Snapshot;
 use eframe::egui;
+use tmog_core::process_table::Row;
 
 use crate::gui::graph::{GraphModel, Trace};
 
@@ -156,7 +157,8 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
     }
 }
 
-pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot) {
+pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize>) {
+    let mut core_panel = *core_panel_mut;
     ui.heading(format!("CPU — {} busy", dash(s.aggregate, "%")));
     if !s.hist_cpu.is_empty() {
         let m = hist_model(
@@ -199,7 +201,22 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot) {
         }
     }
     ui.add_space(4.0);
+    // gentle discoverability note for the clickable core grid: a single
+    // subdued line right above it, hidden while a core panel is open
+    // (no popup, no modal, no first-run state to persist)
+    if core_panel.is_none() {
+        ui.label(
+            egui::RichText::new("tip: click any core bar to list tasks last seen running on it")
+                .weak()
+                .italics()
+                .size(11.0),
+        );
+    }
+    // per-core grid: clickable — selecting a core opens the "tasks seen
+    // on this core" panel (attribution is approximate; see below)
     let cols = (s.per_core.len() as f32).sqrt().ceil().max(1.0) as usize;
+    let mut clicked: Option<usize> = None;
+    let mut clear_sel = false;
     egui::Grid::new("cores")
         .num_columns(cols)
         .spacing([3.0, 3.0])
@@ -213,12 +230,92 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot) {
                         pct.map(|p| p.round()).unwrap_or(0.0)
                     ))
                     .desired_width(110.0);
-                ui.add(bar);
+                let resp = ui
+                    .add(bar)
+                    .on_hover_text("click: tasks last seen on this core");
+                // make the bar respond to clicks (ProgressBar is hover-only)
+                let resp = resp.interact(egui::Sense::click());
+                if resp.clicked() {
+                    clicked = Some(i);
+                }
                 if (i + 1) % cols == 0 {
                     ui.end_row();
                 }
             }
         });
+    if let Some(i) = clicked {
+        core_panel = if core_panel == Some(i) {
+            None // toggle off
+        } else {
+            Some(i)
+        };
+    }
+    if core_panel.is_some() && ui.button("close core view").clicked() {
+        clear_sel = true;
+    }
+    if clear_sel {
+        core_panel = None;
+    }
+    if let Some(i) = core_panel {
+        let core = i as u32;
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("Tasks last seen on CPU {core}")).strong());
+            if let Some(p) = s.per_core.get(i).and_then(|(_, p)| *p) {
+                ui.label(format!("(core {:.0}% busy)", p));
+            }
+        });
+        let pids = s.core_usage.get(&core).cloned().unwrap_or_default();
+        if pids.is_empty() {
+            ui.weak("nothing observed on this core since the last row pass");
+        } else {
+            let mut rows: Vec<&Row> = s
+                .procs
+                .iter()
+                .filter(|r| pids.contains(&r.proc.pid))
+                .collect();
+            rows.sort_by(|a, b| {
+                b.cpu
+                    .unwrap_or(0.0)
+                    .partial_cmp(&a.cpu.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            egui::ScrollArea::vertical()
+                .id_salt("core_panel")
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for r in rows.iter().take(60) {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{:>7}", r.proc.pid));
+                            ui.label(egui::RichText::new(r.proc.display_name()).monospace());
+                            ui.label(
+                                r.cpu
+                                    .map(|c| format!("{c:.1}%"))
+                                    .unwrap_or_else(|| "-".into()),
+                            );
+                            ui.label(user_or_uid(&r.proc));
+                        });
+                    }
+                });
+            ui.label(
+                egui::RichText::new(
+                    "approximate: Linux records where a task was LAST seen, \
+                     not its time per core; busy tasks appear, migrating \
+                     ones may shift",
+                )
+                .small()
+                .weak(),
+            );
+        }
+    }
+    *core_panel_mut = core_panel;
+}
+
+fn user_or_uid(p: &tmog_core::process::Proc) -> String {
+    p.user.clone().unwrap_or_else(|| match p.uid {
+        Some(u) => format!("uid {u}"),
+        None => String::new(),
+    })
 }
 
 pub fn memory_ui(ui: &mut egui::Ui, s: &Snapshot) {

@@ -38,6 +38,8 @@ pub struct App {
     tray: Option<crate::traythread::TrayHandle>,
     /// settings dialog visibility (gear button in the sidebar footer)
     show_settings: bool,
+    /// selected logical core on the CPU page (None = no core panel)
+    cpu_core_panel: Option<usize>,
     timer_started: bool,
 }
 
@@ -64,6 +66,7 @@ impl App {
             applied_theme: None,
             tray: None,
             show_settings: false,
+            cpu_core_panel: None,
             timer_started: false,
         }
     }
@@ -140,6 +143,7 @@ impl App {
             applied_theme: None,
             tray: None,
             show_settings: false,
+            cpu_core_panel: None,
             timer_started: false,
         }
     }
@@ -358,6 +362,14 @@ impl eframe::App for App {
             }
             self.sampler.request_detail(&pids);
         }
+        // CPU page core panel: enrich the pids it lists (they're a small
+        // set; the sampler batches to 25/tick)
+        if self.page == Page::Cpu
+            && let Some(core) = self.cpu_core_panel
+            && let Some(pids) = snap_arc.core_usage.get(&(core as u32))
+        {
+            self.sampler.request_detail(pids);
+        }
 
         // execute any action the processes context menu requested
         if let Some(action) = self.proc_state.pending_action.take() {
@@ -466,7 +478,7 @@ impl App {
     ) {
         match page {
             Page::Summary => pages::summary_ui(ui, snap),
-            Page::Cpu => pages::cpu_ui(ui, snap),
+            Page::Cpu => pages::cpu_ui(ui, snap, &mut self.cpu_core_panel),
             Page::Memory => pages::memory_ui(ui, snap),
             Page::Disks => pages::disks_ui(ui, snap),
             Page::Network => pages::network_ui(ui, snap),

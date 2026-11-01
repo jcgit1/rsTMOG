@@ -28,6 +28,10 @@ pub struct Proc {
     /// from status VmSwap, KiB
     pub vm_swap_kib: u64,
     pub uid: Option<u32>,
+    /// CPU the task was last seen running on (stat field 39,
+    /// "processor"). NOTE: Linux does not track per-cpu time — this is
+    /// the core the task happened to be on when /proc was read.
+    pub last_cpu: u32,
     /// username resolved from /etc/passwd (None if unknown)
     pub user: Option<String>,
     /// argv, NUL-separated in procfs; empty for kernel threads
@@ -91,10 +95,21 @@ pub fn parse_stat(text: &str) -> Result<Proc, String> {
         minflt: num(10),
         majflt: num(12),
         vm_swap_kib: 0,
+        last_cpu: num(39) as u32,
         uid: None,
         user: None,
         cmdline: Vec::new(),
     })
+}
+
+/// Parse just the `processor` field (39) from a /proc/[pid]/stat text —
+/// the CPU the task was last seen on. Cheaper than a full parse when the
+/// caller only needs core attribution. Returns None on malformed input.
+pub fn parse_last_cpu(text: &str) -> Option<u32> {
+    let close = text.rfind(')')?;
+    let rest: Vec<&str> = text[close + 1..].split_whitespace().collect();
+    // field 39 -> rest[36]
+    rest.get(36).and_then(|v| v.parse::<u32>().ok())
 }
 
 /// Parse the subset of `/proc/[pid]/status` we keep: Uid, VmSwap,
@@ -267,6 +282,29 @@ mod tests {
         assert!(parse_stat("no parens here").is_err());
         assert!(parse_stat("xx (y) S").is_err());
         assert!(parse_stat("1 (y) S 0 1").is_err()); // too few fields
+    }
+
+    /// Build a stat line where `processor` (field 39) == `cpu`.
+    fn stat_with_cpu(pid: u32, cpu: u32) -> String {
+        let mut f: Vec<String> = (3..=39).map(|i| (i as u64 + 100).to_string()).collect();
+        // f[0] is field 3, so field 39 lives at index 36
+        f[36] = cpu.to_string();
+        format!("{pid} (my app (test)) {}", f.join(" "))
+    }
+
+    #[test]
+    fn last_cpu_field_parsed() {
+        let line = stat_with_cpu(42, 5);
+        let p = parse_stat(&line).unwrap();
+        assert_eq!(p.last_cpu, 5);
+        assert_eq!(parse_last_cpu(&line), Some(5));
+        let line = stat_with_cpu(7, 41);
+        assert_eq!(parse_last_cpu(&line), Some(41));
+        // a line truncated before field 39: parse_last_cpu -> None, and
+        // parse_stat defaults last_cpu to 0 without panicking
+        let short = "9 (z) S 1 9 9 0 -1 0 0 0 0 0 0 0 0 0 0 0 1 0 1 0";
+        assert_eq!(parse_last_cpu(short), None);
+        assert_eq!(parse_stat(short).unwrap().last_cpu, 0);
     }
 
     #[test]

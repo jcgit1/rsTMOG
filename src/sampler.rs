@@ -51,6 +51,13 @@ pub struct Snapshot {
     pub hist_disk: RateHistory,
     /// per-interface (name, rx B/s, tx B/s)
     pub hist_net: RateHistory,
+
+    /// Which pids were last seen running on each CPU. A running snapshot
+    /// across ticks: each tick merges in the tasks whose `last_cpu` we
+    /// just observed; old members whose pid vanished are pruned when the
+    /// row pass runs. Approximate by nature (Linux records only where a
+    /// task was *last seen*, not per-core time) — see process::last_cpu.
+    pub core_usage: std::collections::HashMap<u32, Vec<u32>>,
 }
 
 const HIST_LEN: usize = 240; // ~4 min at 1 Hz
@@ -281,6 +288,16 @@ impl Sampler {
                 }
                 self.snapshot.procs = rows;
                 self.row_pass_ticks = self.agg_ticks;
+                // rebuild core attribution from this pass's observations
+                let mut usage: std::collections::HashMap<u32, Vec<u32>> =
+                    std::collections::HashMap::new();
+                for r in &self.snapshot.procs {
+                    usage.entry(r.proc.last_cpu).or_default().push(r.proc.pid);
+                }
+                for v in usage.values_mut() {
+                    v.sort_unstable();
+                }
+                self.snapshot.core_usage = usage;
             }
         }
 
