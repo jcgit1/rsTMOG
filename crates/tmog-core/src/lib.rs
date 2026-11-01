@@ -12,9 +12,11 @@ pub mod diskstats;
 pub mod fs;
 pub mod gpu;
 pub mod hwmon;
+pub mod linux;
 pub mod loadavg;
 pub mod meminfo;
 pub mod netdev;
+pub mod platform;
 pub mod pressure;
 pub mod process;
 pub mod process_table;
@@ -22,4 +24,6 @@ pub mod rapl;
 pub mod ring;
 pub mod settings;
 pub mod sysinfo;
+#[cfg(target_os = "windows")]
+pub mod windows;
 pub mod zfs;
