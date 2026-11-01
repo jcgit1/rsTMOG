@@ -32,6 +32,8 @@ pub struct Snapshot {
     pub uptime_s: Option<f64>,
     pub procs: Vec<Row>,
     pub disks: Vec<DiskCounters>,
+    /// live util% per disk (name, 0..=100 or None on the first sample)
+    pub disk_util: Vec<(String, Option<f64>)>,
     pub nets: Vec<NetDevCounters>,
     pub temps: Vec<tmog_core::hwmon::Reading>,
     pub cpu_temp: Option<tmog_core::hwmon::Reading>,
@@ -79,6 +81,9 @@ pub struct Sampler {
     // rate baselines: name -> (last_bytes, last_us)
     prev_disk_read: std::collections::HashMap<String, (u64, u64)>,
     prev_disk_write: std::collections::HashMap<String, (u64, u64)>,
+    /// busy_ms + sampler-start time (µs) per disk at the last sample
+    /// (util% window)
+    prev_disk_busy: std::collections::HashMap<String, (u64, u64)>,
     prev_net_rx: std::collections::HashMap<String, (u64, u64)>,
     prev_net_tx: std::collections::HashMap<String, (u64, u64)>,
     /// cumulative aggregate cpu ticks (USER_HZ) at the last row pass and
@@ -125,6 +130,7 @@ impl Sampler {
             tick: 0,
             prev_disk_read: Default::default(),
             prev_disk_write: Default::default(),
+            prev_disk_busy: Default::default(),
             prev_net_rx: Default::default(),
             prev_net_tx: Default::default(),
             agg_ticks: 0,
@@ -303,6 +309,26 @@ impl Sampler {
 
         // ---- disks / nets -------------------------------------------
         if let Ok(d) = tmog_core::diskstats::collect(root) {
+            // live util% per disk: busy_ms delta over real elapsed time
+            // since the previous disk sample. First sample / restarted
+            // counters → None (dash), never a fabricated spike.
+            let now_us = std::time::UNIX_EPOCH
+                .elapsed()
+                .map(|d| d.as_micros() as u64)
+                .unwrap_or(0);
+            let mut utils = Vec::with_capacity(d.len());
+            for c in &d {
+                let u = match self.prev_disk_busy.get(&c.name) {
+                    Some((prev_busy, prev_us)) => {
+                        tmog_core::diskstats::util_percent(*prev_busy, c.busy_ms, now_us - prev_us)
+                    }
+                    None => None,
+                };
+                self.prev_disk_busy
+                    .insert(c.name.clone(), (c.busy_ms, now_us));
+                utils.push((c.name.clone(), u));
+            }
+            self.snapshot.disk_util = utils;
             self.snapshot.disks = d;
         }
         if let Ok(n) = tmog_core::netdev::collect(root) {

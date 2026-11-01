@@ -41,6 +41,12 @@ pub struct App {
     /// selected logical core on the CPU page (None = no core panel)
     cpu_core_panel: Option<usize>,
     timer_started: bool,
+    /// async process actions: EndTask runs on a worker thread; results
+    /// come back over this channel and become footer toasts
+    action_tx: crossbeam_channel::Sender<(proc_table::ProcAction, bool, i32)>,
+    action_rx: crossbeam_channel::Receiver<(proc_table::ProcAction, bool, i32)>,
+    /// footer toast: (message, when it expires)
+    toast: Option<(String, std::time::Instant)>,
 }
 
 impl App {
@@ -55,6 +61,7 @@ impl App {
         };
         let sampler = SamplerHandle::start(settings.refresh_ms);
         let snap = sampler.snapshot();
+        let (action_tx, action_rx) = crossbeam_channel::unbounded();
         App {
             sampler,
             snap,
@@ -68,6 +75,9 @@ impl App {
             show_settings: false,
             cpu_core_panel: None,
             timer_started: false,
+            action_tx,
+            action_rx,
+            toast: None,
         }
     }
 
@@ -132,6 +142,7 @@ impl App {
         let sampler = SamplerHandle::start(refresh_ms);
         let snap = sampler.snapshot();
         let settings = Settings::default();
+        let (action_tx, action_rx) = crossbeam_channel::unbounded();
         App {
             sampler,
             snap,
@@ -145,6 +156,9 @@ impl App {
             show_settings: false,
             cpu_core_panel: None,
             timer_started: false,
+            action_tx,
+            action_rx,
+            toast: None,
         }
     }
 
@@ -341,6 +355,25 @@ impl eframe::App for App {
                     ui.separator();
                     ui.label(format!("{:.0}°C {}", t.value, t.label));
                 }
+                // action-result toast (end task / kill / priority), fades
+                // out after a few seconds
+                let toast_alive = self
+                    .toast
+                    .as_ref()
+                    .is_some_and(|(_, until)| until > &std::time::Instant::now());
+                if !toast_alive {
+                    self.toast = None;
+                } else if let Some((msg, _)) = &self.toast {
+                    ui.separator();
+                    ui.colored_label(
+                        if msg.contains("failed") {
+                            egui::Color32::from_rgb(235, 90, 90)
+                        } else {
+                            egui::Color32::from_rgb(120, 220, 140)
+                        },
+                        msg,
+                    );
+                }
             });
         });
 
@@ -371,6 +404,9 @@ impl eframe::App for App {
             self.sampler.request_detail(pids);
         }
 
+        // async end-task (and anything else) reporting back: drain into toasts
+        self.drain_action_results();
+
         // execute any action the processes context menu requested
         if let Some(action) = self.proc_state.pending_action.take() {
             self.run_proc_action(action);
@@ -390,30 +426,75 @@ impl eframe::App for App {
 }
 
 impl App {
-    /// Execute a process action off the paint path. end_task is blocking
-    /// (SIGTERM→wait→SIGKILL) — acceptable here because it's user-
-    /// initiated and short-lived; heavy work would move to a thread.
+    /// Execute a process action without touching the paint path. end_task
+    /// is blocking (SIGTERM→wait→SIGKILL), so it runs on a short-lived
+    /// worker thread; every action reports back over a channel and the
+    /// result lands as a footer toast on a later frame. A thread is
+    /// cheaper than a tick-loop state machine here: actions are rare and
+    /// user-initiated, and the thread must never outlive the action.
     fn run_proc_action(&mut self, a: proc_table::ProcAction) {
         use std::time::Duration;
         use tmog_core::actions;
-        let res = match &a {
-            proc_table::ProcAction::EndTask(pid) => {
-                actions::end_task(*pid as i32, Duration::from_secs(3))
+        // fast, non-blocking actions can complete inline
+        let inline = match &a {
+            proc_table::ProcAction::EndTask(_) => None,
+            proc_table::ProcAction::ForceKill(pid) => Some(actions::force_kill(*pid as i32)),
+            proc_table::ProcAction::Suspend(pid) => Some(actions::suspend(*pid as i32)),
+            proc_table::ProcAction::Resume(pid) => Some(actions::resume(*pid as i32)),
+            proc_table::ProcAction::SetNice(pid, nice) => {
+                Some(actions::set_nice(*pid as i32, *nice))
             }
-            proc_table::ProcAction::ForceKill(pid) => actions::force_kill(*pid as i32),
-            proc_table::ProcAction::Suspend(pid) => actions::suspend(*pid as i32),
-            proc_table::ProcAction::Resume(pid) => actions::resume(*pid as i32),
-            proc_table::ProcAction::SetNice(pid, nice) => actions::set_nice(*pid as i32, *nice),
             proc_table::ProcAction::CopyCmdline(cmd) => {
                 self.clipboard_text = Some(cmd.clone());
                 return;
             }
         };
-        if !res.ok {
-            // surface the failure; a toast in the footer would be nicer,
-            // stderr is honest for now
-            eprintln!("process action {a:?} failed: errno {}", res.errno);
+        if let Some(res) = inline {
+            self.report_action(&a, res.ok, res.errno);
+            return;
         }
+        // EndTask: SIGTERM→grace→SIGKILL off the UI thread.
+        if let proc_table::ProcAction::EndTask(pid) = a {
+            let tx = self.action_tx.clone();
+            let _ = std::thread::Builder::new()
+                .name("rstmog-endtask".into())
+                .spawn(move || {
+                    let res = actions::end_task(pid as i32, Duration::from_secs(3));
+                    // a closed receiver just means the app quit mid-kill
+                    let _ = tx.send((proc_table::ProcAction::EndTask(pid), res.ok, res.errno));
+                });
+            self.toast = Some((format!("ending task {pid}…"), Self::toast_deadline()));
+        }
+    }
+
+    /// Record a toast + wake factor for surfacing action results.
+    fn toast_deadline() -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(4)
+    }
+
+    /// Drain async action results into the toast slot.
+    fn drain_action_results(&mut self) {
+        while let Ok((a, ok, errno)) = self.action_rx.try_recv() {
+            self.report_action(&a, ok, errno);
+        }
+    }
+
+    /// Turn an action outcome into a footer toast (success or errno).
+    fn report_action(&mut self, a: &proc_table::ProcAction, ok: bool, errno: i32) {
+        let what = match a {
+            proc_table::ProcAction::EndTask(p) => format!("end task {p}"),
+            proc_table::ProcAction::ForceKill(p) => format!("force kill {p}"),
+            proc_table::ProcAction::Suspend(p) => format!("suspend {p}"),
+            proc_table::ProcAction::Resume(p) => format!("resume {p}"),
+            proc_table::ProcAction::SetNice(p, n) => format!("set priority {p}→{n}"),
+            proc_table::ProcAction::CopyCmdline(_) => return,
+        };
+        let msg = if ok {
+            format!("{what} ok")
+        } else {
+            format!("{what} failed: errno {errno}")
+        };
+        self.toast = Some((msg, Self::toast_deadline()));
     }
 }
 

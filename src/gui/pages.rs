@@ -437,17 +437,26 @@ pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
             continue;
         }
         let id = tmog_core::diskstats::read_identity(std::path::Path::new("/"), &d.name);
+        let util = s
+            .disk_util
+            .iter()
+            .find(|(n, _)| *n == d.name)
+            .and_then(|(_, u)| *u);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&d.name).strong());
             ui.label(id.model.unwrap_or("-".into()));
             ui.label(format!(
-                "read {} M  write {} M  {}",
+                "read {} M  write {} M  {}  {}",
                 d.read_bytes / 1_000_000,
                 d.write_bytes / 1_000_000,
                 match id.rotational {
                     Some(1) => "HDD",
                     Some(_) => "SSD",
                     None => "?",
+                },
+                match util {
+                    Some(u) => format!("busy {u:.0}%"),
+                    None => "busy -".into(),
                 }
             ));
         });
@@ -556,8 +565,19 @@ pub fn thermals_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 }
                 match r.kind {
                     tmog_core::hwmon::SensorKind::Temp => {
-                        ui.label(&r.label);
-                        ui.label(format!("{:.1} °C", r.value));
+                        // the headline sensor (what the footer/graph use)
+                        // is bolded in the list so it stands out
+                        let headline = s
+                            .cpu_temp
+                            .as_ref()
+                            .is_some_and(|h| h.chip == r.chip && h.label == r.label);
+                        if headline {
+                            ui.label(egui::RichText::new(&r.label).strong());
+                            ui.label(egui::RichText::new(format!("{:.1} °C", r.value)).strong());
+                        } else {
+                            ui.label(&r.label);
+                            ui.label(format!("{:.1} °C", r.value));
+                        }
                     }
                     tmog_core::hwmon::SensorKind::Fan => {
                         ui.label(&r.label);
@@ -573,6 +593,44 @@ pub fn thermals_ui(ui: &mut egui::Ui, s: &Snapshot) {
             }
         });
 }
+
+/// "booted Tue 2026-10-28 21:14" — civil date from unix seconds via
+/// Howard Hinnant's days-from-civil algorithm (no chrono dependency).
+/// `uptime_s` (when present) disambiguates the wall-vs-skew case: we
+/// show the derived boot instant, not a live countdown.
+fn format_boot_time(unix_secs: i64, _uptime_s: Option<f64>) -> String {
+    let days = unix_secs.div_euclid(86_400);
+    let secs = unix_secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let wd = weekday_from_days(days);
+    format!(
+        "{} {y:04}-{m:02}-{d:02} {:02}:{:02}",
+        DAYS[wd],
+        secs / 3600,
+        (secs % 3600) / 60
+    )
+}
+
+/// days → (year, month, day). Hinnant civil_from_days.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// days → day-of-week index into DAYS (0 = Thursday, the unix epoch).
+fn weekday_from_days(z: i64) -> usize {
+    z.rem_euclid(7) as usize
+}
+
+const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
 
 pub fn system_ui(ui: &mut egui::Ui, s: &Snapshot) {
     ui.heading("System");
@@ -596,6 +654,14 @@ pub fn system_ui(ui: &mut egui::Ui, s: &Snapshot) {
                     ui.label(gib(m.mem_total));
                     ui.end_row();
                 }
+                if let Some(bt) = si
+                    .boot_time
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                {
+                    ui.label("booted");
+                    ui.label(format_boot_time(bt.as_secs() as i64, s.uptime_s));
+                    ui.end_row();
+                }
             });
     }
     // cpu model from cpuinfo live
@@ -604,5 +670,48 @@ pub fn system_ui(ui: &mut egui::Ui, s: &Snapshot) {
             "{} ({} logical, {} cores)",
             ci.model, ci.logical, ci.cores
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn civil_from_days_known_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        assert_eq!(civil_from_days(59), (1970, 3, 1)); // 1970 not a leap year
+        assert_eq!(civil_from_days(20_454), (2026, 1, 1));
+        assert_eq!(civil_from_days(20_818), (2026, 12, 31));
+        assert_eq!(civil_from_days(20_819), (2027, 1, 1));
+        // leap-day boundaries
+        assert_eq!(civil_from_days(20_147), (2025, 2, 28));
+        assert_eq!(civil_from_days(20_148), (2025, 3, 1)); // 2025 not leap
+        assert_eq!(civil_from_days(19_782), (2024, 2, 29)); // 2024 is
+        assert_eq!(civil_from_days(19_783), (2024, 3, 1));
+        // 2026-10-31 (Saturday) == day 20757: wd idx = 20757 % 7 = 2 → DAYS[2]
+        assert_eq!(weekday_from_days(20_757), 2);
+        assert_eq!(DAYS[weekday_from_days(20_757)], "Sat");
+    }
+
+    #[test]
+    fn weekday_matches_epoch_thursday() {
+        assert_eq!(weekday_from_days(0), 0); // Thu
+        assert_eq!(weekday_from_days(1), 1); // Fri
+        assert_eq!(weekday_from_days(-1), 6); // Wed
+        // 2025-10-31 was a Friday
+        let s = format_boot_time(1_761_900_000, None);
+        assert!(s.starts_with("Fri"), "{s}");
+    }
+
+    #[test]
+    fn boot_time_renders_date_and_clock() {
+        // 2026-01-01 00:00:00 UTC == 1_767_225_600
+        let s = format_boot_time(1_767_225_600, Some(100.0));
+        assert_eq!(s, "Thu 2026-01-01 00:00");
+        // 2026-10-31 21:04 UTC == day 20757 → Sat
+        let s = format_boot_time(20_757 * 86_400 + 21 * 3600 + 4 * 60, Some(0.0));
+        assert_eq!(s, "Sat 2026-10-31 21:04");
     }
 }
