@@ -152,8 +152,9 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
             // column (this is why the GPU graph never showed). 350 px per
             // column fits three side by side in the default window and
             // scrolls horizontally past that.
-            let col = 350.0_f32;
+            let col = 330.0_f32;
             ui.push_id("graphs", |ui| {
+                ui.spacing_mut().item_spacing.x = 20.0;
                 if !s.hist_cpu.is_empty() {
                     let m = hist_model(
                         "cpu",
@@ -189,7 +190,7 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                         false,
                     );
                     ui.vertical(|ui| {
-                        ui.label("\u{b0}C");
+                        ui.label("CPU temp °C");
                         super::graph::graph_ui_w(ui, &m, 90.0, col);
                     });
                 }
