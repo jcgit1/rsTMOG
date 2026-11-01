@@ -47,6 +47,8 @@ pub struct Snapshot {
     pub hist_cpu: Vec<(u64, f64)>,
     /// cpu package temperature °C
     pub hist_temp: Vec<(u64, f64)>,
+    /// GPU utilization % (None = no NVML/GPU present)
+    pub hist_gpu: Option<Vec<(u64, f64)>>,
     /// memory used %
     pub hist_mem: Vec<(u64, f64)>,
     /// per-physical-disk (name, read B/s, write B/s) sampled rates
@@ -415,6 +417,10 @@ impl Sampler {
         }
         if let Some(ref ct) = self.snapshot.cpu_temp {
             push(&mut self.snapshot.hist_temp, ct.value);
+        }
+        // GPU busy % (lazy-allocated: stays None when there is no NVML)
+        if let Some(g) = self.snapshot.gpu.as_ref().and_then(|g| g.busy_percent) {
+            push(self.snapshot.hist_gpu.get_or_insert_with(Vec::new), g);
         }
 
         // disk rates (physical candidates only, matching the page filter)
