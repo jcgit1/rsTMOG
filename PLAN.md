@@ -258,6 +258,11 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       async follow-up noted)
 - [x] CPU page: aggregate graph + per-core grid, topology header (model/
       threads/cores/sockets), freq/governor/driver line
+- [x] CPU page: click-a-core → "tasks last seen on CPU N" panel —
+      `Proc::last_cpu` (stat field 39) + cheap `parse_last_cpu()` in core;
+      clickable core bars (ProgressBar + Sense::click), an always-visible
+      discoverability tip, and an explicit "approximate: Linux records
+      where a task was LAST seen, not per-CPU time" disclaimer
 - [x] Memory page: in-use graph, stacked composition bar (in-use / zfs
       arc / cached / buffers / free via core mem_composition), readout
       grid, PSI line
@@ -273,6 +278,8 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
       headline sensor bolded (partially: headline shown; bold-in-list TODO)
 - [x] System page: hostname/distro/kernel/arch/CPU/mem (landed in the
       v1 shell; boot-time line is the remaining nit)
+- [x] Disks/Network: graphs span the full window width (was capped by the
+      column layout; the trace now claims all available width)
 - [x] Themes: dark default + phosphor green/amber/blue + mono + light
       (egui Visuals via theme_visuals()); live switch in the settings
       dialog; persisted to TOML. Live window icon follows the theme too
@@ -285,7 +292,8 @@ across ~700 pids — the process walk (4 files × pid) dominates. Decisions:
 - [~] Perf: measured (release, llm, ~735 procs): tick avg ~44 ms,
       worst ~143 ms. The <2 ms budget was unrealistic for a full walk —
       the background-thread design already keeps it off the paint path;
-      real fix is the medium/slow polling tiers (open). No allocations
+      real fix is the medium/slow polling tiers (landed — see Phase 4.5),
+      tick avg ~44 ms full / ~12 ms with tiers). No allocations
       added to the paint path beyond egui's own (snapshots are Arc
       clones)
 - [x] CI gate: `scripts/ci.sh` (fmt --check, clippy -D warnings, tests,
