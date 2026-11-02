@@ -195,37 +195,48 @@ fn nl_dump(msg_type: u16, payload: &[u8]) -> Option<Vec<u8>> {
             return None;
         }
         let mut out = Vec::new();
-        let result = loop {
+        let mut done = false;
+        while !done {
             let mut buf = vec![0u8; 65536];
             let n = recv(fd, buf.as_mut_ptr(), buf.len(), 0);
             if n <= 0 {
-                break false;
+                close(fd);
+                return None;
             }
             out.extend_from_slice(&buf[..n as usize]);
+            // Scan the ENTIRE accumulated buffer every pass: DONE may sit
+            // mid-chunk or at the start of the next one — the earlier
+            // per-chunk scan missed it and discarded the whole dump
+            // (every interface silently lost its IP).
             let mut off = 0usize;
-            let mut done = false;
-            while off + 16 <= n as usize {
-                let ln = u32le(&buf, off);
-                let typ = u16le(&buf, off + 4);
+            while off + 16 <= out.len() {
+                let ln = u32le(&out, off) as usize;
+                let typ = u16le(&out, off + 4);
                 if ln < 16 {
-                    break;
-                }
-                if typ == NLMSG_DONE || typ == NLMSG_ERROR {
                     done = true;
                     break;
                 }
-                off += (ln as usize + 3) & !3;
+                match typ {
+                    NLMSG_DONE => done = true,
+                    NLMSG_ERROR => {
+                        close(fd);
+                        return None;
+                    }
+                    _ => off += (ln + 3) & !3,
+                }
+                if done {
+                    break;
+                }
             }
-            if done {
-                break true;
-            }
-        };
+        }
         close(fd);
-        if result { Some(out) } else { None }
+        Some(out)
     }
 }
 
 /// `RTM_GETLINK` dump → ifindex → interface name.
+/// Netlink ifindex (low 16 bits) → interface name, exactly as routes
+/// report it in RTA_OIF.
 fn parse_link_names(msgs: &[u8]) -> std::collections::HashMap<u32, String> {
     let mut names = std::collections::HashMap::new();
     let mut off = 0usize;
@@ -239,7 +250,11 @@ fn parse_link_names(msgs: &[u8]) -> std::collections::HashMap<u32, String> {
             let body = &msgs[off + 16..off + ln];
             // ifinfomsg: family(1) pad(1) type(2) index(4) flags(4) change(4)
             if body.len() >= 16 {
-                let ifindex = u32le(body, 2);
+                // ifinfomsg lays out as family(u8) pad(u8) index(i32):
+                // the index is the u16 at byte 4 (the kernel's upper
+                // half is always zero — mask defensively, not as a
+                // type-field hack, which mis-parsed every NIC but one)
+                let ifindex = u16le(body, 4) as u32;
                 let mut ao = 16usize;
                 while ao + 4 <= body.len() {
                     let al = u16le(body, ao) as usize;
@@ -288,6 +303,7 @@ fn parse_local_v4(
                 let mut ao = 12usize;
                 let mut dst = None;
                 let mut oif = None;
+                let mut table = body[4] as u32;
                 while ao + 4 <= body.len() {
                     let al = u16le(body, ao) as usize;
                     let at = u16le(body, ao + 2);
@@ -299,15 +315,24 @@ fn parse_local_v4(
                         1 if val.len() >= 4 => {
                             dst = Some(Ipv4Addr::new(val[0], val[1], val[2], val[3]))
                         }
+                        // RTA_OIF = 4
                         4 if val.len() >= 4 => oif = Some(u32le(val, 0)),
+                        // RTA_TABLE = 15: authoritative table id (the
+                        // rtmsg table byte is u8 and reads 255 for the
+                        // Local table even when we requested main)
+                        15 if val.len() >= 4 => table = u32le(val, 0),
                         _ => {}
                     }
                     ao += (al + 3) & !3;
                 }
-                if let (Some(a), Some(i)) = (dst, oif)
-                    && names.get(&i).map(String::as_str) == Some(ifname)
-                {
-                    out.push(a);
+                if let (Some(a), Some(i)) = (dst, oif) {
+                    // host routes arrive from both Local (255) and main
+                    // (254) tables; they ARE the interface addresses
+                    if (table == 254 || table == 255)
+                        && names.get(&i).map(String::as_str) == Some(ifname)
+                    {
+                        out.push(a);
+                    }
                 }
             }
         }
@@ -479,6 +504,10 @@ Inter-|   Receive                                                |  Transmit
         body[1] = 32; // dst_len /32
         body[7] = 2; // RTN_LOCAL
         let d = dst.octets();
+        // RTA_TABLE = 255 (Local), as the kernel sends on this box
+        body.extend_from_slice(&8u16.to_le_bytes());
+        body.extend_from_slice(&15u16.to_le_bytes());
+        body.extend_from_slice(&255u32.to_le_bytes());
         // RTA_DST: rta_len = 4 header + 4 addr = 8
         body.extend_from_slice(&8u16.to_le_bytes());
         body.extend_from_slice(&1u16.to_le_bytes()); // RTA_DST
@@ -521,6 +550,46 @@ Inter-|   Receive                                                |  Transmit
             vec!["127.0.0.1".parse::<Ipv4Addr>().unwrap()]
         );
         assert!(parse_local_v4(&msgs, &names, "docker0").is_empty());
+    }
+
+    #[test]
+    fn link_names_use_the_real_ifindex() {
+        // The kernel sends ifinfomsg as family(u8) pad(u8) index(i32):
+        // bytes [2..4] are padding, the index is the u16 at byte 4.
+        // Reading u32le at offset 2 packed garbage into the key
+        // ((type<<16)|index) and no route ever joined a link — the
+        // "IPs vanished from the Network tab" regression.
+        fn link_msg(index: u16, name: &str) -> Vec<u8> {
+            let mut body = vec![0u8; 16]; // ifinfomsg
+            body[4..6].copy_from_slice(&index.to_le_bytes());
+            let mut attr = Vec::new();
+            let n = name.as_bytes();
+            let al = 4 + n.len() + 1; // IFLA_IFNAME + NUL
+            attr.extend_from_slice(&(al as u16).to_le_bytes());
+            attr.extend_from_slice(&3u16.to_le_bytes());
+            attr.extend_from_slice(n);
+            attr.push(0);
+            if attr.len() % 4 != 0 {
+                let pad = 4 - attr.len() % 4;
+                attr.extend(std::iter::repeat_n(0u8, pad));
+            }
+            body.extend_from_slice(&attr);
+            let mut m = Vec::new();
+            m.extend_from_slice(&((16 + body.len()) as u32).to_le_bytes());
+            m.extend_from_slice(&16u16.to_le_bytes()); // RTM_NEWLINK
+            m.extend_from_slice(&0u16.to_le_bytes());
+            m.extend_from_slice(&1u32.to_le_bytes());
+            m.extend_from_slice(&0u32.to_le_bytes());
+            m.extend_from_slice(&body);
+            m
+        }
+        let mut msgs = link_msg(1, "lo");
+        msgs.extend(link_msg(3, "wlan0"));
+        msgs.extend(link_msg(6, "enp59s0"));
+        let names = parse_link_names(&msgs);
+        assert_eq!(names.get(&3).map(String::as_str), Some("wlan0"));
+        assert_eq!(names.get(&6).map(String::as_str), Some("enp59s0"));
+        assert_eq!(names.get(&1).map(String::as_str), Some("lo"));
     }
 
     #[test]
