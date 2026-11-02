@@ -184,9 +184,17 @@ impl GraphModel {
             );
             if self.percent_mode {
                 let label = format!("{:.0}", f * 100.0_f32);
+                // inside the frame, vertically centered on the gridline
+                // (LEFT_TOP at y-8 put the topmost "100" on the frame
+                // edge where it collided with the column title)
+                let (anchor, off) = if i == lines {
+                    (egui::Align2::LEFT_TOP, 3.0_f32)
+                } else {
+                    (egui::Align2::LEFT_CENTER, 0.0_f32)
+                };
                 painter.text(
-                    egui::pos2(rect.left() + 3.0, y - 8.0),
-                    egui::Align2::LEFT_TOP,
+                    egui::pos2(rect.left() + 3.0, y + off),
+                    anchor,
                     label,
                     egui::FontId::proportional(9.0),
                     egui::Color32::from_gray(110),
@@ -377,4 +385,53 @@ pub fn graph_ui_w(ui: &mut egui::Ui, model: &GraphModel, height: f32, width: f32
     };
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(w, height), egui::Sense::hover());
     model.paint(ui, rect);
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    /// The top "100" gridline label must render fully INSIDE the frame
+    /// (the overlap bug: it sat on the frame's top edge and collided
+    /// with the column title above the graph).
+    #[test]
+    fn percent_top_label_stays_inside_frame() {
+        let ctx = egui::Context::default();
+        let mut tr = Trace::new("cpu", egui::Color32::from_rgb(80, 200, 120));
+        tr.samples = (0u64..60).map(|t| (t, 15.0)).collect();
+        let mut m = GraphModel::new(vec![tr], 60, true);
+        m.newest_tick = 59;
+        let full_output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                graph_ui(ui, &m, 90.0);
+            });
+        });
+        let clipped = ctx.tessellate(full_output.shapes, 1.0);
+        // graph frame: find the border rect (gray 60 stroke)
+        let mut frame_top = f32::MAX;
+        let mut label_rows: Vec<f32> = Vec::new();
+        for c in &clipped {
+            let mesh = match &c.primitive {
+                egui::epaint::Primitive::Mesh(m) => m,
+                egui::epaint::Primitive::Callback(_) => continue,
+            };
+            for v in mesh.vertices.iter() {
+                let [r, g, b, _] = v.color.to_array();
+                if (60..=61).contains(&r) && (60..=61).contains(&g) {
+                    frame_top = frame_top.min(v.pos.y);
+                }
+                if (109..=111).contains(&r) && (109..=111).contains(&g) && (109..=111).contains(&b)
+                {
+                    label_rows.push(v.pos.y);
+                }
+            }
+        }
+        assert!(frame_top < f32::MAX, "frame border not found");
+        assert!(!label_rows.is_empty(), "no gridline labels painted");
+        let label_min = label_rows.iter().cloned().fold(f32::INFINITY, f32::min);
+        assert!(
+            label_min >= frame_top,
+            "label pixels above the frame top edge: label_min={label_min} frame_top={frame_top}"
+        );
+    }
 }

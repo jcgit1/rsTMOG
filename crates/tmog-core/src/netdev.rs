@@ -1,8 +1,9 @@
 //! Network interfaces: `/proc/net/dev` counters + `/sys/class/net/*`
-//! identity (speed, operstate, mtu, mac, kind).
+//! identity (speed, operstate, mtu, mac, kind) + IPv4/IPv6 addresses.
 
 use crate::fs;
 use crate::ring::{Rate, RateTracker};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 /// Cumulative rx/tx counters for one interface, from `/proc/net/dev`.
@@ -54,6 +55,13 @@ pub struct NetIdentity {
     pub operstate: Option<String>,
     pub mtu: Option<u64>,
     pub mac: Option<String>,
+    /// IPv4 addresses from `/proc/net/fib_trie` (main table, /32 host
+    /// routes; 127.0.0.1 folded onto `lo` — fib_trie does not carry
+    /// interface names). Sorted, deduped; empty when none.
+    pub ipv4: Vec<Ipv4Addr>,
+    /// Global IPv6 addresses from `/proc/net/if_inet6` (link-local fe80::
+    /// excluded — every interface has one and it identifies nothing).
+    pub ipv6: Vec<Ipv6Addr>,
 }
 
 /// Coarse interface kind.
@@ -79,13 +87,115 @@ pub fn read_identity(sys_root: &Path, name: &str) -> NetIdentity {
     let type_num = fs::read_u64_under(sys_root, &rel("type")).unwrap_or(99);
     let kind = kind_of(name, type_num, txt("wireless").as_deref());
     let _ = kind; // identity keeps raw fields; kind() is a method below
+    let (mut v4, mut v6) = (iface_v4(sys_root, name), iface_v6(sys_root, name));
+    v4.sort();
+    v4.dedup();
+    v6.sort();
+    v6.dedup();
     NetIdentity {
         name: name.to_string(),
         speed_mbps: speed,
         operstate: txt("operstate"),
         mtu: fs::read_u64_under(sys_root, &rel("mtu")).ok(),
         mac: txt("address").filter(|m| !m.is_empty() && m != "00:00:00:00:00:00"),
+        ipv4: v4,
+        ipv6: v6,
     }
+}
+
+/// Best-effort IPv4 list for one interface from `/proc/net/fib_trie`.
+/// The main-table `/32 host` leaf entries are the interface addresses;
+/// fib_trie has no interface names, so 127.0.0.1 is attributed to `lo`
+/// only. Any parse/permission problem degrades to empty.
+pub fn iface_v4(sys_root: &Path, name: &str) -> Vec<Ipv4Addr> {
+    let Ok(text) = fs::read_under(sys_root, "proc/net/fib_trie") else {
+        return Vec::new();
+    };
+    parse_fib_trie_v4(&text, name)
+}
+
+fn parse_fib_trie_v4(text: &str, name: &str) -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    let mut last: Option<Ipv4Addr> = None;
+    let mut in_main = false;
+    for line in text.lines() {
+        // two tables: "Main:" holds unicast routes, "Local:" holds local/
+        // broadcast addresses for every iface (plus 127.0.0.1). Reading
+        // Main only gives each iface its own address, nothing cross-talk.
+        if line.starts_with("Main:") {
+            in_main = true;
+            continue;
+        }
+        if line.starts_with("Local:")
+            || (line.starts_with(|c: char| c.is_alphabetic()) && !line.contains("--"))
+        {
+            in_main = false;
+            continue;
+        }
+        if !in_main {
+            continue;
+        }
+        let t = line.trim_start();
+        // the tree uses three line shapes; only two matter here:
+        //   "|-- a.b.c.d"    address node
+        //   "/32 host LOCAL" a /32 local route = an interface address
+        // (branch lines "+-- 192.168.1.0/24" contain '/', never parsed)
+        if let Some(ip) = t
+            .strip_prefix("|--")
+            .or_else(|| t.strip_prefix("--"))
+            .map(str::trim)
+            && let Ok(a) = ip.parse::<Ipv4Addr>()
+        {
+            last = Some(a);
+            continue;
+        }
+        if t.starts_with("/32 host")
+            && let Some(a) = last.take()
+        {
+            // fib_trie carries no interface names; in the Main table
+            // loopback-range addresses belong to `lo`, everything
+            // else is attributed to the non-loopback interface being
+            // rendered (best-effort, documented limitation)
+            let is_loopback_addr = a.is_loopback();
+            let target_is_lo = name == "lo";
+            if is_loopback_addr == target_is_lo && !name.is_empty() {
+                out.push(a);
+            }
+        }
+    }
+    // every address in the Main table is a host route on this machine
+    out
+}
+
+/// Global IPv6 addresses for one interface from `/proc/net/if_inet6`
+/// (link-local fe80:: excluded). Format: 32-hex scope ifindex flags name.
+pub fn iface_v6(sys_root: &Path, name: &str) -> Vec<Ipv6Addr> {
+    let Ok(text) = fs::read_under(sys_root, "proc/net/if_inet6") else {
+        return Vec::new();
+    };
+    parse_if_inet6(&text, name)
+}
+
+fn parse_if_inet6(text: &str, name: &str) -> Vec<Ipv6Addr> {
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() < 6 || f[5] != name || f[0].len() != 32 {
+                return None;
+            }
+            let hex = f[0];
+            let bytes: Option<Vec<u8>> = (0..16)
+                .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+                .collect();
+            let b: [u8; 16] = bytes?.try_into().ok()?;
+            let a = Ipv6Addr::from(b);
+            // skip link-local (fe80::/10): universal, not identifying
+            if a.segments()[0] & 0xffc0 == 0xfe80 {
+                return None;
+            }
+            Some(a)
+        })
+        .collect()
 }
 
 /// Classify by name, arp type (1=ethernet, 776=loopback) and wireless dir.
@@ -211,6 +321,36 @@ Inter-|   Receive                                                |  Transmit
         let u = read_identity(&root, "nope0");
         assert_eq!(u.speed_mbps, None);
         assert_eq!(u.kind(&root), NetKind::Other);
+    }
+
+    #[test]
+    fn ipv4_addresses_per_iface_from_fib_trie() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        // Main-table /32 hosts: 127.0.0.1 (lo), 192.168.1.42 + .226 (others)
+        let lo = iface_v4(&root, "lo");
+        assert_eq!(lo, vec!["127.0.0.1".parse::<Ipv4Addr>().unwrap()]);
+        let eth = iface_v4(&root, "eth-test");
+        assert_eq!(eth.len(), 2, "got {eth:?}");
+        assert!(eth.contains(&"192.168.1.42".parse().unwrap()));
+        assert!(eth.contains(&"192.168.1.226".parse().unwrap()));
+        // broadcast/route entries never appear; absent file would be empty
+        assert!(!eth.iter().any(|a| a.is_loopback()));
+    }
+
+    #[test]
+    fn ipv6_skips_link_local() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let eth = iface_v6(&root, "eth-test");
+        assert_eq!(eth, vec!["2001:db8::1".parse::<Ipv6Addr>().unwrap()]);
+        // wlan-test has only a link-local address
+        assert!(iface_v6(&root, "wlan-test").is_empty());
+    }
+
+    #[test]
+    fn identity_carries_addresses() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let id = read_identity(&root, "eth-test");
+        assert!(!id.ipv4.is_empty() && !id.ipv6.is_empty());
     }
 
     #[test]

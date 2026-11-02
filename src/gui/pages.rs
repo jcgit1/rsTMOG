@@ -165,6 +165,7 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                     );
                     ui.vertical(|ui| {
                         ui.label("CPU %");
+                        ui.add_space(2.0);
                         super::graph::graph_ui_w(ui, &m, 90.0, col);
                     });
                 }
@@ -178,6 +179,7 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                     );
                     ui.vertical(|ui| {
                         ui.label("GPU %");
+                        ui.add_space(2.0);
                         super::graph::graph_ui_w(ui, &m, 90.0, col);
                     });
                 }
@@ -191,6 +193,7 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                     );
                     ui.vertical(|ui| {
                         ui.label("CPU temp °C");
+                        ui.add_space(2.0);
                         super::graph::graph_ui_w(ui, &m, 90.0, col);
                     });
                 }
@@ -571,15 +574,37 @@ pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
         if n.name == "lo" {
             continue;
         }
-        let id = tmog_core::netdev::read_identity(std::path::Path::new("/"), &n.name);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(&n.name).strong());
+            // IP prefix: the address that actually belongs to this
+            // interface. fib_trie has no interface names, so IPv4 is
+            // attributed heuristically (best-effort, tmog-core docs);
+            // IPv6 comes from if_inet6 and is per-iface exact.
+            let id = tmog_core::netdev::read_identity(std::path::Path::new("/"), &n.name);
+            let kind = id.kind(std::path::Path::new("/"));
+            let my_ip = if kind == tmog_core::netdev::NetKind::Virtual {
+                None
+            } else if let Some(a) = id.ipv6.first() {
+                Some(a.to_string())
+            } else if !id.ipv4.is_empty() {
+                // one physical NIC per box in practice: attribute the
+                // non-loopback /32 set to physical (wired/wifi) ifaces
+                match kind {
+                    tmog_core::netdev::NetKind::Wired | tmog_core::netdev::NetKind::Wifi => {
+                        Some(id.ipv4[0].to_string())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let title = match &my_ip {
+                Some(a) => format!("{a}  {}", n.name),
+                None => n.name.clone(),
+            };
+            ui.label(egui::RichText::new(title).strong());
             let speed = id.speed_mbps.map(|s| format!("{s}M")).unwrap_or_default();
             let mac = id.mac.clone().unwrap_or_default();
-            ui.label(format!(
-                "{:?} {speed} {mac}",
-                id.kind(std::path::Path::new("/"))
-            ));
+            ui.label(format!("{kind:?} {speed} {mac}"));
             ui.label(format!("rx {} MB", n.rx_bytes / 1_000_000));
             ui.label(format!("tx {} MB", n.tx_bytes / 1_000_000));
         });
