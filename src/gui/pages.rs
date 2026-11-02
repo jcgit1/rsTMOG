@@ -145,6 +145,13 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
     let gpu_hist = s.hist_gpu.as_deref().unwrap_or(&[]);
     let show_graphs = !s.hist_cpu.is_empty() || !s.hist_temp.is_empty() || !gpu_hist.is_empty();
     if show_graphs {
+        // Separator between the readout grid and the graph strip — the
+        // pattern task managers use to split the stat section from the
+        // history section (btop has a thin line, BSM Task Manager a
+        // header band). Plus breathing room on both sides.
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             // fixed column width: `available_width` inside a horizontal
             // row reports the whole remaining width, so a graph asked to
