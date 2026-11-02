@@ -583,26 +583,17 @@ pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
         }
         ui.horizontal(|ui| {
             // IP prefix: the address that actually belongs to this
-            // interface. fib_trie has no interface names, so IPv4 is
-            // attributed heuristically (best-effort, tmog-core docs);
-            // IPv6 comes from if_inet6 and is per-iface exact.
+            // interface — exact per-interface mapping from the kernel's
+            // route/link tables (netlink) and if_inet6, no heuristics.
+            // Virtual interfaces intentionally show no prefix.
             let id = tmog_core::netdev::read_identity(std::path::Path::new("/"), &n.name);
             let kind = id.kind(std::path::Path::new("/"));
             let my_ip = if kind == tmog_core::netdev::NetKind::Virtual {
                 None
             } else if let Some(a) = id.ipv6.first() {
                 Some(a.to_string())
-            } else if !id.ipv4.is_empty() {
-                // one physical NIC per box in practice: attribute the
-                // non-loopback /32 set to physical (wired/wifi) ifaces
-                match kind {
-                    tmog_core::netdev::NetKind::Wired | tmog_core::netdev::NetKind::Wifi => {
-                        Some(id.ipv4[0].to_string())
-                    }
-                    _ => None,
-                }
             } else {
-                None
+                id.ipv4.first().map(|a| a.to_string())
             };
             let title = match &my_ip {
                 Some(a) => format!("{a}  {}", n.name),

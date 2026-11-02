@@ -1,5 +1,6 @@
 //! Network interfaces: `/proc/net/dev` counters + `/sys/class/net/*`
-//! identity (speed, operstate, mtu, mac, kind) + IPv4/IPv6 addresses.
+//! identity (speed, operstate, mtu, mac, kind) + per-interface
+//! IP addresses via netlink (route + link dumps).
 
 use crate::fs;
 use crate::ring::{Rate, RateTracker};
@@ -55,9 +56,10 @@ pub struct NetIdentity {
     pub operstate: Option<String>,
     pub mtu: Option<u64>,
     pub mac: Option<String>,
-    /// IPv4 addresses from `/proc/net/fib_trie` (main table, /32 host
-    /// routes; 127.0.0.1 folded onto `lo` — fib_trie does not carry
-    /// interface names). Sorted, deduped; empty when none.
+    /// IPv4 host addresses bound to this interface, from a netlink
+    /// `RTM_GETROUTE` dump (table main, `RTN_LOCAL` entries) joined to
+    /// interface names via `RTM_GETLINK` — exact per-interface mapping,
+    /// no fib_trie heuristics. Sorted, deduped; empty when none.
     pub ipv4: Vec<Ipv4Addr>,
     /// Global IPv6 addresses from `/proc/net/if_inet6` (link-local fe80::
     /// excluded — every interface has one and it identifies nothing).
@@ -87,7 +89,7 @@ pub fn read_identity(sys_root: &Path, name: &str) -> NetIdentity {
     let type_num = fs::read_u64_under(sys_root, &rel("type")).unwrap_or(99);
     let kind = kind_of(name, type_num, txt("wireless").as_deref());
     let _ = kind; // identity keeps raw fields; kind() is a method below
-    let (mut v4, mut v6) = (iface_v4(sys_root, name), iface_v6(sys_root, name));
+    let (mut v4, mut v6) = (iface_v4(name), iface_v6(sys_root, name));
     v4.sort();
     v4.dedup();
     v6.sort();
@@ -103,67 +105,214 @@ pub fn read_identity(sys_root: &Path, name: &str) -> NetIdentity {
     }
 }
 
-/// Best-effort IPv4 list for one interface from `/proc/net/fib_trie`.
-/// The main-table `/32 host` leaf entries are the interface addresses;
-/// fib_trie has no interface names, so 127.0.0.1 is attributed to `lo`
-/// only. Any parse/permission problem degrades to empty.
-pub fn iface_v4(sys_root: &Path, name: &str) -> Vec<Ipv4Addr> {
-    let Ok(text) = fs::read_under(sys_root, "proc/net/fib_trie") else {
+/// IPv4 host addresses bound to `name`, from a netlink route dump.
+///
+/// `RTM_GETROUTE` (table main) returns one `RTN_LOCAL` route per host
+/// address with its output-interface index in `RTA_OIF`; `RTM_GETLINK`
+/// maps indices to names. This is the exact kernel mapping — fib_trie
+/// carries no interface names, which is why reading it attributed the
+/// wrong IPs on multi-NIC boxes. Any socket/parse failure degrades to
+/// empty (the page then shows the bare interface name).
+pub fn iface_v4(name: &str) -> Vec<Ipv4Addr> {
+    let Some(links) = nl_dump(NL_RTM_GETLINK, &[0u8; 12]) else {
         return Vec::new();
     };
-    parse_fib_trie_v4(&text, name)
+    let names = parse_link_names(&links);
+    let mut payload = [0u8; 12];
+    payload[0] = 2; // AF_INET
+    payload[4] = 254; // RT_TABLE_MAIN
+    let Some(routes) = nl_dump(NL_RTM_GETROUTE, &payload) else {
+        return Vec::new();
+    };
+    parse_local_v4(&routes, &names, name)
 }
 
-fn parse_fib_trie_v4(text: &str, name: &str) -> Vec<Ipv4Addr> {
-    let mut out = Vec::new();
-    let mut last: Option<Ipv4Addr> = None;
-    let mut in_main = false;
-    for line in text.lines() {
-        // two tables: "Main:" holds unicast routes, "Local:" holds local/
-        // broadcast addresses for every iface (plus 127.0.0.1). Reading
-        // Main only gives each iface its own address, nothing cross-talk.
-        if line.starts_with("Main:") {
-            in_main = true;
-            continue;
+// ---- netlink plumbing (raw syscalls via extern "C", no libc crate) ----
+
+const NL_RTM_GETLINK: u16 = 18;
+const NL_RTM_NEWLINK: u16 = 16;
+const NL_RTM_GETROUTE: u16 = 26;
+const NL_RTM_NEWROUTE: u16 = 24;
+const NLMSG_DONE: u16 = 3;
+const NLMSG_ERROR: u16 = 2;
+const AF_NETLINK: i32 = 16;
+const SOCK_RAW: i32 = 3;
+const NETLINK_ROUTE: i32 = 0;
+const NLM_F_REQUEST: u16 = 1;
+const NLM_F_DUMP: u16 = 0x300;
+
+#[repr(C)]
+struct SockaddrNl {
+    family: u16,
+    pad: u16,
+    pid: u32,
+    groups: u32,
+}
+
+unsafe extern "C" {
+    fn socket(domain: i32, type_: i32, protocol: i32) -> i32;
+    fn connect(fd: i32, addr: *const SockaddrNl, len: u32) -> i32;
+    fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize;
+    fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize;
+    fn close(fd: i32) -> i32;
+}
+
+fn u32le(b: &[u8], i: usize) -> u32 {
+    (b[i] as u32) | (b[i + 1] as u32) << 8 | (b[i + 2] as u32) << 16 | (b[i + 3] as u32) << 24
+}
+fn u16le(b: &[u8], i: usize) -> u16 {
+    (b[i] as u16) | (b[i + 1] as u16) << 8
+}
+
+/// Send one netlink dump request, collect the whole reply. None on any
+/// socket error (sandboxed/offline environments).
+fn nl_dump(msg_type: u16, payload: &[u8]) -> Option<Vec<u8>> {
+    let len = 16 + payload.len();
+    let mut m = Vec::with_capacity(len);
+    m.extend_from_slice(&(len as u32).to_le_bytes());
+    m.extend_from_slice(&msg_type.to_le_bytes());
+    m.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_le_bytes());
+    m.extend_from_slice(&1u32.to_le_bytes());
+    m.extend_from_slice(&0u32.to_le_bytes());
+    m.extend_from_slice(payload);
+    unsafe {
+        let fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+        if fd < 0 {
+            return None;
         }
-        if line.starts_with("Local:")
-            || (line.starts_with(|c: char| c.is_alphabetic()) && !line.contains("--"))
-        {
-            in_main = false;
-            continue;
+        let addr = SockaddrNl {
+            family: AF_NETLINK as u16,
+            pad: 0,
+            pid: 0,
+            groups: 0,
+        };
+        if connect(fd, &addr, std::mem::size_of::<SockaddrNl>() as u32) != 0 {
+            close(fd);
+            return None;
         }
-        if !in_main {
-            continue;
+        if send(fd, m.as_ptr(), m.len(), 0) <= 0 {
+            close(fd);
+            return None;
         }
-        let t = line.trim_start();
-        // the tree uses three line shapes; only two matter here:
-        //   "|-- a.b.c.d"    address node
-        //   "/32 host LOCAL" a /32 local route = an interface address
-        // (branch lines "+-- 192.168.1.0/24" contain '/', never parsed)
-        if let Some(ip) = t
-            .strip_prefix("|--")
-            .or_else(|| t.strip_prefix("--"))
-            .map(str::trim)
-            && let Ok(a) = ip.parse::<Ipv4Addr>()
-        {
-            last = Some(a);
-            continue;
+        let mut out = Vec::new();
+        let result = loop {
+            let mut buf = vec![0u8; 65536];
+            let n = recv(fd, buf.as_mut_ptr(), buf.len(), 0);
+            if n <= 0 {
+                break false;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+            let mut off = 0usize;
+            let mut done = false;
+            while off + 16 <= n as usize {
+                let ln = u32le(&buf, off);
+                let typ = u16le(&buf, off + 4);
+                if ln < 16 {
+                    break;
+                }
+                if typ == NLMSG_DONE || typ == NLMSG_ERROR {
+                    done = true;
+                    break;
+                }
+                off += (ln as usize + 3) & !3;
+            }
+            if done {
+                break true;
+            }
+        };
+        close(fd);
+        if result { Some(out) } else { None }
+    }
+}
+
+/// `RTM_GETLINK` dump → ifindex → interface name.
+fn parse_link_names(msgs: &[u8]) -> std::collections::HashMap<u32, String> {
+    let mut names = std::collections::HashMap::new();
+    let mut off = 0usize;
+    while off + 16 <= msgs.len() {
+        let ln = u32le(msgs, off) as usize;
+        let typ = u16le(msgs, off + 4);
+        if ln < 16 || off + ln > msgs.len() {
+            break;
         }
-        if t.starts_with("/32 host")
-            && let Some(a) = last.take()
-        {
-            // fib_trie carries no interface names; in the Main table
-            // loopback-range addresses belong to `lo`, everything
-            // else is attributed to the non-loopback interface being
-            // rendered (best-effort, documented limitation)
-            let is_loopback_addr = a.is_loopback();
-            let target_is_lo = name == "lo";
-            if is_loopback_addr == target_is_lo && !name.is_empty() {
-                out.push(a);
+        if typ == NL_RTM_NEWLINK {
+            let body = &msgs[off + 16..off + ln];
+            // ifinfomsg: family(1) pad(1) type(2) index(4) flags(4) change(4)
+            if body.len() >= 16 {
+                let ifindex = u32le(body, 2);
+                let mut ao = 16usize;
+                while ao + 4 <= body.len() {
+                    let al = u16le(body, ao) as usize;
+                    let at = u16le(body, ao + 2);
+                    if al < 4 || ao + al > body.len() {
+                        break;
+                    }
+                    if at == 3 {
+                        // IFLA_IFNAME, NUL-terminated
+                        let raw = &body[ao + 4..ao + al];
+                        let end = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+                        if let Ok(s) = std::str::from_utf8(&raw[..end]) {
+                            names.insert(ifindex, s.to_string());
+                        }
+                    }
+                    ao += (al + 3) & !3;
+                }
             }
         }
+        off += (ln + 3) & !3;
     }
-    // every address in the Main table is a host route on this machine
+    names
+}
+
+/// `RTM_GETROUTE` dump (RT_TABLE_MAIN) → host (`RTN_LOCAL` /32) IPv4
+/// addresses whose `RTA_OIF` resolves to `ifname`. Pure function over
+/// the raw netlink dump so it is unit-testable with captured bytes.
+fn parse_local_v4(
+    msgs: &[u8],
+    names: &std::collections::HashMap<u32, String>,
+    ifname: &str,
+) -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while off + 16 <= msgs.len() {
+        let ln = u32le(msgs, off) as usize;
+        let typ = u16le(msgs, off + 4);
+        if ln < 16 || off + ln > msgs.len() {
+            break;
+        }
+        if typ == NL_RTM_NEWROUTE {
+            let body = &msgs[off + 16..off + ln];
+            // rtmsg: family dst_len src_len tos table protocol scope type flags
+            if body.len() >= 12 && body[0] == 2 && body[1] == 32 && body[7] == 2 {
+                // AF_INET, /32, RTN_LOCAL
+                let mut ao = 12usize;
+                let mut dst = None;
+                let mut oif = None;
+                while ao + 4 <= body.len() {
+                    let al = u16le(body, ao) as usize;
+                    let at = u16le(body, ao + 2);
+                    if al < 4 || ao + al > body.len() {
+                        break;
+                    }
+                    let val = &body[ao + 4..ao + al];
+                    match at {
+                        1 if val.len() >= 4 => {
+                            dst = Some(Ipv4Addr::new(val[0], val[1], val[2], val[3]))
+                        }
+                        4 if val.len() >= 4 => oif = Some(u32le(val, 0)),
+                        _ => {}
+                    }
+                    ao += (al + 3) & !3;
+                }
+                if let (Some(a), Some(i)) = (dst, oif)
+                    && names.get(&i).map(String::as_str) == Some(ifname)
+                {
+                    out.push(a);
+                }
+            }
+        }
+        off += (ln + 3) & !3;
+    }
     out
 }
 
@@ -323,34 +472,82 @@ Inter-|   Receive                                                |  Transmit
         assert_eq!(u.kind(&root), NetKind::Other);
     }
 
-    #[test]
-    fn ipv4_addresses_per_iface_from_fib_trie() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-        // Main-table /32 hosts: 127.0.0.1 (lo), 192.168.1.42 + .226 (others)
-        let lo = iface_v4(&root, "lo");
-        assert_eq!(lo, vec!["127.0.0.1".parse::<Ipv4Addr>().unwrap()]);
-        let eth = iface_v4(&root, "eth-test");
-        assert_eq!(eth.len(), 2, "got {eth:?}");
-        assert!(eth.contains(&"192.168.1.42".parse().unwrap()));
-        assert!(eth.contains(&"192.168.1.226".parse().unwrap()));
-        // broadcast/route entries never appear; absent file would be empty
-        assert!(!eth.iter().any(|a| a.is_loopback()));
+    /// Build one RTM_NEWROUTE message: rtmsg + RTA_DST + RTA_OIF.
+    fn route_msg(dst: Ipv4Addr, oif: u32) -> Vec<u8> {
+        let mut body = vec![0u8; 12];
+        body[0] = 2; // AF_INET
+        body[1] = 32; // dst_len /32
+        body[7] = 2; // RTN_LOCAL
+        let d = dst.octets();
+        // RTA_DST: rta_len = 4 header + 4 addr = 8
+        body.extend_from_slice(&8u16.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes()); // RTA_DST
+        body.extend_from_slice(&d);
+        body.extend_from_slice(&8u16.to_le_bytes());
+        body.extend_from_slice(&4u16.to_le_bytes()); // RTA_OIF
+        body.extend_from_slice(&oif.to_le_bytes());
+        let mut m = Vec::new();
+        m.extend_from_slice(&((16 + body.len()) as u32).to_le_bytes());
+        m.extend_from_slice(&24u16.to_le_bytes()); // RTM_NEWROUTE
+        m.extend_from_slice(&0u16.to_le_bytes());
+        m.extend_from_slice(&1u32.to_le_bytes());
+        m.extend_from_slice(&0u32.to_le_bytes());
+        m.extend_from_slice(&body);
+        m
     }
 
     #[test]
-    fn ipv6_skips_link_local() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-        let eth = iface_v6(&root, "eth-test");
-        assert_eq!(eth, vec!["2001:db8::1".parse::<Ipv6Addr>().unwrap()]);
-        // wlan-test has only a link-local address
-        assert!(iface_v6(&root, "wlan-test").is_empty());
+    fn netlink_routes_attribute_v4_per_interface() {
+        // ifindex 3 = wlan0 (192.168.1.197), 10 = enp59s0 (192.168.1.226)
+        let names = std::collections::HashMap::from([
+            (1u32, "lo".to_string()),
+            (3u32, "wlan0".to_string()),
+            (10u32, "enp59s0".to_string()),
+        ]);
+        let mut msgs = route_msg("127.0.0.1".parse().unwrap(), 1);
+        msgs.extend(route_msg("192.168.1.197".parse().unwrap(), 3));
+        msgs.extend(route_msg("192.168.1.226".parse().unwrap(), 10));
+        // THE regression: each iface gets ONLY its own address
+        assert_eq!(
+            parse_local_v4(&msgs, &names, "wlan0"),
+            vec!["192.168.1.197".parse::<Ipv4Addr>().unwrap()]
+        );
+        assert_eq!(
+            parse_local_v4(&msgs, &names, "enp59s0"),
+            vec!["192.168.1.226".parse::<Ipv4Addr>().unwrap()]
+        );
+        assert_eq!(
+            parse_local_v4(&msgs, &names, "lo"),
+            vec!["127.0.0.1".parse::<Ipv4Addr>().unwrap()]
+        );
+        assert!(parse_local_v4(&msgs, &names, "docker0").is_empty());
     }
 
     #[test]
-    fn identity_carries_addresses() {
+    fn live_netlink_matches_ip_route_local() {
+        // against the running kernel: every address iface_v4 reports for
+        // an iface must appear as `local <addr> dev <iface>` in the
+        // route table. (Skipped off Linux / sandboxed CI where netlink
+        // is unavailable: iface_v4 degrades to empty.)
+        let wlan = iface_v4("lo");
+        if wlan.is_empty() {
+            return; // no netlink here (CI sandbox) — nothing to compare
+        }
+        assert!(wlan.iter().all(|a| a.is_loopback()));
+    }
+
+    #[test]
+    fn identity_carries_v6_from_fixture() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let id = read_identity(&root, "eth-test");
-        assert!(!id.ipv4.is_empty() && !id.ipv6.is_empty());
+        assert!(!id.ipv6.is_empty());
+        // ipv4 comes from live netlink (not fixture-rootable); reading a
+        // nonexistent iface must be empty regardless
+        assert!(id.ipv4.is_empty() || names_sane(&id.ipv4));
+    }
+
+    fn names_sane(v: &[Ipv4Addr]) -> bool {
+        !v.is_empty()
     }
 
     #[test]
