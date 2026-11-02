@@ -107,6 +107,14 @@ pub struct GraphModel {
     pub scale: ScaleFollower,
     /// percent mode draws 0/25/50/75/100 gridlines; rate mode 0..peak
     pub percent_mode: bool,
+    /// unit suffix for rate-mode axis labels (e.g. " °C"). Empty by
+    /// default so CPU/disk/net graphs keep their bare numbers.
+    pub unit: String,
+    /// Some((min, max)) overrides the autoscale follower entirely: the
+    /// y-axis spans exactly this band (used for temperature, where a
+    /// peak-hold 0..peak axis crushes a 58-64 °C swing into a flat
+    /// line). None = autoscale as before.
+    pub band: Option<(f64, f64)>,
 }
 
 /// Live-app ticks flow through `Sampler`; the GUI builds models from
@@ -122,6 +130,8 @@ impl GraphModel {
             window: window.max(2),
             scale: ScaleFollower::new(floor, 0.1),
             percent_mode,
+            unit: String::new(),
+            band: None,
         }
     }
 
@@ -156,7 +166,12 @@ impl GraphModel {
     /// a faint gradient fill under it.
     pub fn paint(&self, ui: &mut egui::Ui, rect: egui::Rect) {
         let painter = ui.painter();
-        let y_max = self.scale.current();
+        // band mode: values are shifted by the band floor so mapping is
+        // 0..(band span); the follower is bypassed.
+        let (y_base, y_max) = match self.band {
+            Some((lo, hi)) => (lo, (hi - lo).max(1e-9)),
+            None => (0.0, self.scale.current()),
+        };
         let ticks = self.tick_window();
 
         // background + border
@@ -182,10 +197,20 @@ impl GraphModel {
                 [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
                 egui::Stroke::new(1.0_f32, color),
             );
-            if self.percent_mode {
-                let label = format!("{:.0}", f * 100.0_f32);
+            let label = if self.percent_mode {
+                Some(format!("{:.0}", f * 100.0_f32))
+            } else if i == lines {
+                Some(format!("{:.0}{}", y_base + y_max, self.unit))
+            } else if i == 2 {
+                Some(format!("{:.0}{}", y_base + y_max / 2.0, self.unit))
+            } else if i == 0 {
+                Some(format!("{:.0}{}", y_base, self.unit))
+            } else {
+                None
+            };
+            if let Some(label) = label {
                 // inside the frame, vertically centered on the gridline
-                // (LEFT_TOP at y-8 put the topmost "100" on the frame
+                // (LEFT_TOP at y-8 put the topmost label on the frame
                 // edge where it collided with the column title)
                 let (anchor, off) = if i == lines {
                     (egui::Align2::LEFT_TOP, 3.0_f32)
@@ -210,7 +235,7 @@ impl GraphModel {
                 .samples
                 .iter()
                 .filter(|(t, v)| *t >= t0 && *t <= t1 && v.is_finite())
-                .map(|(t, v)| window_to_ui(rect, *t, *v, ticks, y_max))
+                .map(|(t, v)| window_to_ui(rect, *t, *v - y_base, ticks, y_max))
                 .collect();
             if pts.len() >= 2 {
                 // fill under the line

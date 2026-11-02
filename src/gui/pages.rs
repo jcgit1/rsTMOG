@@ -8,27 +8,40 @@ use tmog_core::process_table::Row;
 use crate::gui::graph::{GraphModel, Trace};
 
 /// Build a single-trace model from a (tick, value) history slice.
+/// `unit` labels the rate-mode y-axis (pass "" for percent graphs).
 fn hist_model(
     name: &str,
     color: egui::Color32,
     hist: &[(u64, f64)],
     window: usize,
     percent: bool,
+    unit: &str,
 ) -> GraphModel {
     let mut tr = Trace::new(name, color);
     tr.samples = hist.to_vec();
     let mut m = GraphModel::new(vec![tr], window, percent);
+    m.unit = unit.to_string();
     if let Some(&(last_t, _)) = hist.last() {
         m.newest_tick = last_t;
     }
     let t0 = m.tick_window().0;
-    let mx = hist
-        .iter()
-        .filter(|(t, _)| *t >= t0)
-        .map(|(_, v)| *v)
-        .filter(|v| v.is_finite())
-        .fold(0.0f64, f64::max);
-    m.scale.observe(mx);
+    let (mut mx, mut mn, mut cur) = (0.0f64, f64::MAX, None);
+    for (t, v) in hist {
+        if *t >= t0 && v.is_finite() {
+            mx = mx.max(*v);
+            mn = mn.min(*v);
+            cur = Some(*v);
+        }
+    }
+    if percent {
+        m.scale.observe(mx);
+    } else if cur.is_some() {
+        // rate mode with a band: axis spans [min, max] padded 15% so a
+        // 58-64 °C swing fills the frame instead of hugging the top.
+        let pad = ((mx - mn) * 0.15).max(3.0);
+        let lo = (mn - pad).max(0.0); // temperatures never go below 0
+        m.band = Some((lo, (mx + pad).max(lo + 5.0)));
+    }
     m
 }
 
@@ -169,6 +182,7 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                         &s.hist_cpu,
                         60,
                         true,
+                        "",
                     );
                     ui.vertical(|ui| {
                         ui.label("CPU %");
@@ -183,6 +197,7 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                         gpu_hist,
                         60,
                         true,
+                        "",
                     );
                     ui.vertical(|ui| {
                         ui.label("GPU %");
@@ -197,9 +212,15 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                         &s.hist_temp,
                         60,
                         false,
+                        " °C",
                     );
                     ui.vertical(|ui| {
-                        ui.label("CPU temp °C");
+                        let cur = s
+                            .hist_temp
+                            .last()
+                            .map(|(_, v)| format!("  — {:.0} °C", v))
+                            .unwrap_or_default();
+                        ui.label(format!("CPU temp °C{cur}"));
                         ui.add_space(2.0);
                         super::graph::graph_ui_w(ui, &m, 90.0, col);
                     });
@@ -219,6 +240,7 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
             &s.hist_cpu,
             WINDOW,
             true,
+            "",
         );
         super::graph::graph_ui(ui, &m, 90.0);
         ui.add_space(8.0);
@@ -408,6 +430,7 @@ pub fn memory_ui(ui: &mut egui::Ui, s: &Snapshot) {
             &s.hist_mem,
             WINDOW,
             true,
+            "",
         );
         super::graph::graph_ui(ui, &gm, 110.0);
         ui.add_space(6.0);
@@ -634,6 +657,7 @@ pub fn thermals_ui(ui: &mut egui::Ui, s: &Snapshot) {
             &s.hist_temp,
             WINDOW,
             false,
+            " °C",
         );
         super::graph::graph_ui(ui, &m, 120.0);
         ui.add_space(6.0);
