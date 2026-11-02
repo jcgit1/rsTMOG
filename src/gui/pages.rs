@@ -638,49 +638,59 @@ pub fn thermals_ui(ui: &mut egui::Ui, s: &Snapshot) {
         super::graph::graph_ui(ui, &m, 120.0);
         ui.add_space(6.0);
     }
-    let mut last_chip = "";
-    egui::Grid::new("thermals")
-        .num_columns(2)
-        .spacing([18.0, 3.0])
+    // the hwmon list grows taller than the window (k10temp + nvme +
+    // acpitz groups); scroll the list instead of clipping sensors below
+    // the fold — heading and trend graph stay pinned above it
+    egui::ScrollArea::vertical()
+        .id_salt("thermals")
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            for r in &s.temps {
-                if r.chip != last_chip {
-                    ui.separator();
-                    ui.separator();
-                    ui.end_row();
-                    ui.label(egui::RichText::new(&r.chip).strong());
-                    ui.label("");
-                    ui.end_row();
-                    last_chip = &r.chip;
-                }
-                match r.kind {
-                    tmog_core::hwmon::SensorKind::Temp => {
-                        // the headline sensor (what the footer/graph use)
-                        // is bolded in the list so it stands out
-                        let headline = s
-                            .cpu_temp
-                            .as_ref()
-                            .is_some_and(|h| h.chip == r.chip && h.label == r.label);
-                        if headline {
-                            ui.label(egui::RichText::new(&r.label).strong());
-                            ui.label(egui::RichText::new(format!("{:.1} °C", r.value)).strong());
-                        } else {
-                            ui.label(&r.label);
-                            ui.label(format!("{:.1} °C", r.value));
+            let mut last_chip = "";
+            egui::Grid::new("thermals")
+                .num_columns(2)
+                .spacing([18.0, 3.0])
+                .show(ui, |ui| {
+                    for r in &s.temps {
+                        if r.chip != last_chip {
+                            ui.separator();
+                            ui.separator();
+                            ui.end_row();
+                            ui.label(egui::RichText::new(&r.chip).strong());
+                            ui.label("");
+                            ui.end_row();
+                            last_chip = &r.chip;
                         }
+                        match r.kind {
+                            tmog_core::hwmon::SensorKind::Temp => {
+                                // the headline sensor (what the footer/graph use)
+                                // is bolded in the list so it stands out
+                                let headline = s
+                                    .cpu_temp
+                                    .as_ref()
+                                    .is_some_and(|h| h.chip == r.chip && h.label == r.label);
+                                if headline {
+                                    ui.label(egui::RichText::new(&r.label).strong());
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.1} °C", r.value)).strong(),
+                                    );
+                                } else {
+                                    ui.label(&r.label);
+                                    ui.label(format!("{:.1} °C", r.value));
+                                }
+                            }
+                            tmog_core::hwmon::SensorKind::Fan => {
+                                ui.label(&r.label);
+                                ui.label(format!("{:.0} RPM", r.value));
+                            }
+                            tmog_core::hwmon::SensorKind::Voltage => {
+                                ui.label(&r.label);
+                                ui.label(format!("{:.0} mV", r.value));
+                            }
+                            tmog_core::hwmon::SensorKind::Other => continue,
+                        }
+                        ui.end_row();
                     }
-                    tmog_core::hwmon::SensorKind::Fan => {
-                        ui.label(&r.label);
-                        ui.label(format!("{:.0} RPM", r.value));
-                    }
-                    tmog_core::hwmon::SensorKind::Voltage => {
-                        ui.label(&r.label);
-                        ui.label(format!("{:.0} mV", r.value));
-                    }
-                    tmog_core::hwmon::SensorKind::Other => continue,
-                }
-                ui.end_row();
-            }
+                });
         });
 }
 
