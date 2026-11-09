@@ -120,34 +120,34 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
             }
             if let Some(t) = &s.cpu_temp {
                 ui.label("Temp");
-                // CPU package temp, plus the GPU temp on the same line:
-                // separated with a divider so both are readable but
-                // clearly distinct readings.
-                let gpu_part = s
-                    .gpu
-                    .as_ref()
-                    .and_then(|g| g.temp_c)
-                    .map(|gt| format!("   |   GPU {:.0}°C", gt))
-                    .unwrap_or_default();
-                ui.label(format!("{:.0}°C  ({}){}", t.value, t.label, gpu_part));
+                ui.label(format!("{:.0}°C  ({})", t.value, t.label));
                 ui.end_row();
             }
             if let Some(g) = &s.gpu {
+                // Blank row: egui's grid ignores add_space, and a 6 px
+                // row gap left this field sitting on the CPU temp line.
+                let _ = ui.allocate_exact_size(egui::vec2(0.0, 16.0), egui::Sense::hover());
+                ui.end_row();
                 ui.label("GPU");
                 let mem = match (g.mem_used_mib, g.mem_total_mib) {
                     (Some(u), Some(t)) => format!("{u}/{t} MiB"),
                     _ => "-".into(),
                 };
+                let temp = g
+                    .temp_c
+                    .map(|c| format!(", {c:.0}°C"))
+                    .unwrap_or_default();
                 ui.label(format!(
-                    "{} — {} busy, {}{}{}",
+                    "{} — {} busy, {}{}{}{}",
                     g.name,
                     dash(g.busy_percent, "%"),
                     mem,
+                    temp,
                     g.power_draw_w
-                        .map(|w| format!(", {:.0} W", w))
+                        .map(|w| format!(", {w:.0} W"))
                         .unwrap_or_default(),
                     g.power_limit_w
-                        .map(|w| format!(" / {:.0} W limit", w))
+                        .map(|w| format!(" / {w:.0} W limit"))
                         .unwrap_or_default(),
                 ));
                 ui.end_row();
