@@ -191,20 +191,33 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
                 .show(ui, |ui| {
                     // ---- header cells (fixed-width monospace, clickable) ----
                     let cells: [(String, SortKey); 5] = [
-                        (pads(header_label("pid", SortKey::Pid, st), PID_W), SortKey::Pid),
-                        (pads(header_label("name", SortKey::Name, st), NAME_W), SortKey::Name),
-                        (pads(header_label("cpu%", SortKey::Cpu, st), CPU_W), SortKey::Cpu),
-                        (pads(header_label("mem", SortKey::Mem, st), MEM_W), SortKey::Mem),
-                        (pads(header_label("user", SortKey::User, st), USER_W), SortKey::User),
+                        (
+                            pads(header_label("pid", SortKey::Pid, st), PID_W),
+                            SortKey::Pid,
+                        ),
+                        (
+                            pads(header_label("name", SortKey::Name, st), NAME_W),
+                            SortKey::Name,
+                        ),
+                        (
+                            pads(header_label("cpu%", SortKey::Cpu, st), CPU_W),
+                            SortKey::Cpu,
+                        ),
+                        (
+                            pads(header_label("mem", SortKey::Mem, st), MEM_W),
+                            SortKey::Mem,
+                        ),
+                        (
+                            pads(header_label("user", SortKey::User, st), USER_W),
+                            SortKey::User,
+                        ),
                     ];
                     for (txt, key) in cells {
                         ui.horizontal(|ui| {
                             ui.add_space(CELL_PAD.x);
                             let resp = ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(txt).monospace().strong(),
-                                )
-                                .sense(egui::Sense::click()),
+                                egui::Label::new(egui::RichText::new(txt).monospace().strong())
+                                    .sense(egui::Sense::click()),
                             );
                             if resp.clicked() {
                                 click = Some(key);
@@ -257,12 +270,9 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
                         ui.horizontal(|ui| {
                             ui.add_space(CELL_PAD.x);
                             ui.label(
-                                egui::RichText::new(pads_left(
-                                    mem_h(r.proc.rss_bytes),
-                                    MEM_W,
-                                ))
-                                .monospace()
-                                .color(row_color(r.proc.state)),
+                                egui::RichText::new(pads_left(mem_h(r.proc.rss_bytes), MEM_W))
+                                    .monospace()
+                                    .color(row_color(r.proc.state)),
                             );
                         });
                         let resp = ui.horizontal(|ui| {
