@@ -133,10 +133,7 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                     (Some(u), Some(t)) => format!("{u}/{t} MiB"),
                     _ => "-".into(),
                 };
-                let temp = g
-                    .temp_c
-                    .map(|c| format!(", {c:.0}°C"))
-                    .unwrap_or_default();
+                let temp = g.temp_c.map(|c| format!(", {c:.0}°C")).unwrap_or_default();
                 ui.label(format!(
                     "{} — {} busy, {}{}{}{}",
                     g.name,
@@ -153,10 +150,13 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 ui.end_row();
             }
         });
-    // GPU % history rides the same scrolling-graph widget as the CPU;
+    // GPU histories ride the same scrolling-graph widget as the CPU;
     // only drawn when NVML is present (no GPU → no empty frame).
     let gpu_hist = s.hist_gpu.as_deref().unwrap_or(&[]);
-    let show_graphs = !s.hist_cpu.is_empty() || !s.hist_temp.is_empty() || !gpu_hist.is_empty();
+    let gpu_temp = s.hist_gpu_temp.as_deref().unwrap_or(&[]);
+    let gpu_temp_live = gpu_temp.iter().any(|(_, v)| v.is_finite());
+    let show_graphs =
+        !s.hist_cpu.is_empty() || !s.hist_temp.is_empty() || !gpu_hist.is_empty() || gpu_temp_live;
     if show_graphs {
         // Separator between the readout grid and the graph strip — the
         // pattern task managers use to split the stat section from the
@@ -165,67 +165,89 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            // fixed column width: `available_width` inside a horizontal
-            // row reports the whole remaining width, so a graph asked to
-            // fill it consumed the entire row and clipped every later
-            // column (this is why the GPU graph never showed). 350 px per
-            // column fits three side by side in the default window and
-            // scrolls horizontally past that.
-            let col = 330.0_f32;
-            ui.push_id("graphs", |ui| {
-                ui.spacing_mut().item_spacing.x = 20.0;
-                if !s.hist_cpu.is_empty() {
-                    let m = hist_model(
-                        "cpu",
-                        egui::Color32::from_rgb(80, 200, 120),
-                        &s.hist_cpu,
-                        60,
-                        true,
-                        "",
-                    );
-                    ui.vertical(|ui| {
-                        ui.label("CPU %");
-                        ui.add_space(2.0);
-                        super::graph::graph_ui_w(ui, &m, 90.0, col);
-                    });
+        // Two columns that share the panel width. A fixed 330 px strip
+        // needed the window near full screen before the third graph
+        // fit; `available_width` inside a horizontal row is the whole
+        // remaining width, so the column size is computed out here and
+        // each graph is given that width explicitly.
+        let gap = 20.0_f32;
+        let col = ((ui.available_width() - gap) / 2.0).max(120.0);
+        let celsius = |hist: &[(u64, f64)]| {
+            hist.last()
+                .filter(|(_, v)| v.is_finite())
+                .map(|(_, v)| format!("  — {v:.0} °C"))
+                .unwrap_or_default()
+        };
+        let mut cells: Vec<(String, GraphModel)> = Vec::new();
+        if !s.hist_cpu.is_empty() {
+            cells.push((
+                "CPU %".into(),
+                hist_model(
+                    "cpu",
+                    egui::Color32::from_rgb(80, 200, 120),
+                    &s.hist_cpu,
+                    60,
+                    true,
+                    "",
+                ),
+            ));
+        }
+        if !gpu_hist.is_empty() {
+            cells.push((
+                "GPU %".into(),
+                hist_model(
+                    "gpu",
+                    egui::Color32::from_rgb(150, 120, 230),
+                    gpu_hist,
+                    60,
+                    true,
+                    "",
+                ),
+            ));
+        }
+        if !s.hist_temp.is_empty() {
+            cells.push((
+                format!("CPU temp °C{}", celsius(&s.hist_temp)),
+                hist_model(
+                    "temp",
+                    egui::Color32::from_rgb(230, 140, 60),
+                    &s.hist_temp,
+                    60,
+                    false,
+                    " °C",
+                ),
+            ));
+        }
+        if gpu_temp_live {
+            cells.push((
+                format!("GPU temp °C{}", celsius(gpu_temp)),
+                hist_model(
+                    "gpu_temp",
+                    egui::Color32::from_rgb(220, 90, 80),
+                    gpu_temp,
+                    60,
+                    false,
+                    " °C",
+                ),
+            ));
+        }
+        ui.push_id("graphs", |ui| {
+            for (row_i, row) in cells.chunks(2).enumerate() {
+                if row_i > 0 {
+                    ui.add_space(10.0);
                 }
-                if !gpu_hist.is_empty() {
-                    let m = hist_model(
-                        "gpu",
-                        egui::Color32::from_rgb(150, 120, 230),
-                        gpu_hist,
-                        60,
-                        true,
-                        "",
-                    );
-                    ui.vertical(|ui| {
-                        ui.label("GPU %");
-                        ui.add_space(2.0);
-                        super::graph::graph_ui_w(ui, &m, 90.0, col);
-                    });
-                }
-                if !s.hist_temp.is_empty() {
-                    let m = hist_model(
-                        "temp",
-                        egui::Color32::from_rgb(230, 140, 60),
-                        &s.hist_temp,
-                        60,
-                        false,
-                        " °C",
-                    );
-                    ui.vertical(|ui| {
-                        let cur = s
-                            .hist_temp
-                            .last()
-                            .map(|(_, v)| format!("  — {:.0} °C", v))
-                            .unwrap_or_default();
-                        ui.label(format!("CPU temp °C{cur}"));
-                        ui.add_space(2.0);
-                        super::graph::graph_ui_w(ui, &m, 90.0, col);
-                    });
-                }
-            });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for (title, model) in row {
+                        ui.vertical(|ui| {
+                            ui.set_width(col);
+                            ui.label(title);
+                            ui.add_space(2.0);
+                            super::graph::graph_ui_w(ui, model, 90.0, col);
+                        });
+                    }
+                });
+            }
         });
     }
 }
@@ -890,6 +912,109 @@ mod tests {
         assert_eq!(
             gpu_system_line(&bare),
             "NVIDIA GeForce RTX 5090 Laptop GPU — - busy, -"
+        );
+    }
+
+    /// Summary graphs wrap at two columns: CPU % | GPU %, then
+    /// CPU temp °C | GPU temp °C. A single row of fixed-width graphs
+    /// used to need a full-screen window before the later columns fit.
+    #[test]
+    fn summary_graphs_are_two_columns_with_gpu_temp_celsius() {
+        let series = |v: f64| (0u64..40).map(|t| (t, v)).collect::<Vec<_>>();
+        let snap = Snapshot {
+            hist_cpu: series(20.0),
+            hist_gpu: Some(series(30.0)),
+            hist_temp: series(55.0),
+            hist_gpu_temp: Some(series(62.0)),
+            ..Snapshot::default()
+        };
+        let ctx = egui::Context::default();
+        let width = 800.0;
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(width, 700.0),
+        ));
+        let full_output = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                summary_ui(ui, &snap);
+            });
+        });
+        let mut texts = Vec::new();
+        fn collect_text(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(ts) => out.push(ts.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(v) => {
+                    for s in v {
+                        collect_text(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for clipped_shape in &full_output.shapes {
+            collect_text(&clipped_shape.shape, &mut texts);
+        }
+        let clipped = ctx.tessellate(full_output.shapes, 1.0);
+        let mut green = Vec::new();
+        let mut purple = Vec::new();
+        let mut orange = Vec::new();
+        let mut red = Vec::new();
+        for c in &clipped {
+            let mesh = match &c.primitive {
+                egui::epaint::Primitive::Mesh(m) => m,
+                egui::epaint::Primitive::Callback(_) => continue,
+            };
+            for v in mesh.vertices.iter() {
+                let (r, g, b) = (v.color.r(), v.color.g(), v.color.b());
+                let p = (v.pos.x, v.pos.y);
+                if r < 110 && g > 160 && b > 80 && b < 160 {
+                    green.push(p);
+                } else if r > 120 && r < 180 && g > 90 && g < 150 && b > 200 {
+                    purple.push(p);
+                } else if r > 200 && g > 110 && g < 170 && b < 90 {
+                    orange.push(p);
+                } else if r > 190 && g > 60 && g < 120 && b > 50 && b < 110 {
+                    red.push(p);
+                }
+            }
+        }
+        let mean = |pts: &[(f32, f32)]| {
+            let n = pts.len() as f32;
+            let (sx, sy) = pts.iter().fold((0.0, 0.0), |(x, y), p| (x + p.0, y + p.1));
+            (sx / n, sy / n)
+        };
+        assert!(!green.is_empty(), "CPU % trace missing");
+        assert!(!purple.is_empty(), "GPU % trace missing");
+        assert!(!orange.is_empty(), "CPU temp trace missing");
+        assert!(!red.is_empty(), "GPU temp trace missing");
+        let (gx, gy) = mean(&green);
+        let (px, py) = mean(&purple);
+        let (ox, oy) = mean(&orange);
+        let (rx, ry) = mean(&red);
+        assert!(gx < px, "CPU % should be the left column, got {gx} vs {px}");
+        assert!(
+            ox < rx,
+            "GPU temp should sit right of CPU temp, got {ox} vs {rx}"
+        );
+        assert!(
+            (gy - py).abs() < 20.0,
+            "CPU % and GPU % should share a row, got y {gy} vs {py}"
+        );
+        assert!(
+            (oy - ry).abs() < 20.0,
+            "CPU temp and GPU temp should share a row, got y {oy} vs {ry}"
+        );
+        assert!(oy > gy + 40.0, "temps should be the row under utilization");
+        assert!(rx < width, "GPU temp clipped past the panel, x={rx}");
+        let celsius: Vec<_> = texts.iter().filter(|t| t.contains("°C")).collect();
+        assert!(
+            celsius.iter().any(|t| t.contains("CPU temp")),
+            "CPU temp title missing Celsius, texts={texts:?}"
+        );
+        assert!(
+            celsius.iter().any(|t| t.contains("GPU temp")),
+            "GPU temp title missing Celsius, texts={texts:?}"
         );
     }
 

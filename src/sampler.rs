@@ -49,6 +49,8 @@ pub struct Snapshot {
     pub hist_temp: Vec<(u64, f64)>,
     /// GPU utilization % (None = no NVML/GPU present)
     pub hist_gpu: Option<Vec<(u64, f64)>>,
+    /// GPU temperature °C (None = no NVML/GPU present). NVML reports Celsius.
+    pub hist_gpu_temp: Option<Vec<(u64, f64)>>,
     /// memory used %
     pub hist_mem: Vec<(u64, f64)>,
     /// per-physical-disk (name, read B/s, write B/s) sampled rates
@@ -419,12 +421,19 @@ impl Sampler {
         if let Some(ref ct) = self.snapshot.cpu_temp {
             push(&mut self.snapshot.hist_temp, Some(ct.value));
         }
-        // GPU busy %: push an explicit None gap when NVML is present but a
-        // tick's utilization read failed (get_or_insert so the series
-        // starts lazily when a GPU exists).
+        // GPU busy % and temperature °C: push an explicit None gap when
+        // NVML is present but a tick's read failed (get_or_insert so the
+        // series starts lazily when a GPU exists). Temperature is Celsius
+        // as NVML reports it.
         if self.nvml.is_some() {
-            let busy = self.snapshot.gpu.as_ref().and_then(|g| g.busy_percent);
+            let gpu = self.snapshot.gpu.as_ref();
+            let busy = gpu.and_then(|g| g.busy_percent);
             push(self.snapshot.hist_gpu.get_or_insert_with(Vec::new), busy);
+            let temp = gpu.and_then(|g| g.temp_c);
+            push(
+                self.snapshot.hist_gpu_temp.get_or_insert_with(Vec::new),
+                temp,
+            );
         }
 
         // disk rates (physical candidates only, matching the page filter)
