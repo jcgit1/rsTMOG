@@ -795,6 +795,37 @@ pub fn system_ui(ui: &mut egui::Ui, s: &Snapshot) {
             ci.model, ci.logical, ci.cores
         ));
     }
+    // GPU identity sits directly under the CPU line. Live fields come from
+    // the sampler's NVML snapshot (absent when there is no NVIDIA GPU).
+    if let Some(g) = &s.gpu {
+        ui.label(gpu_system_line(g));
+    }
+}
+
+/// System-page GPU line: name, then the readings the sampler already has.
+fn gpu_system_line(g: &tmog_core::gpu::GpuInfo) -> String {
+    let mem = match (g.mem_used_mib, g.mem_total_mib) {
+        (Some(u), Some(t)) => format!("{u}/{t} MiB"),
+        (None, Some(t)) | (Some(t), None) => format!("{t} MiB"),
+        (None, None) => "-".into(),
+    };
+    let mut extra = String::new();
+    if let Some(t) = g.temp_c {
+        extra.push_str(&format!(", {t:.0}°C"));
+    }
+    if let Some(mhz) = g.graphics_clock_mhz {
+        extra.push_str(&format!(", {mhz} MHz"));
+    }
+    if let Some(w) = g.power_draw_w {
+        extra.push_str(&format!(", {w:.0} W"));
+    }
+    format!(
+        "{} — {} busy, {}{}",
+        g.name,
+        dash(g.busy_percent, "%"),
+        mem,
+        extra
+    )
 }
 
 #[cfg(test)]
@@ -827,6 +858,39 @@ mod tests {
         // 2025-10-31 was a Friday
         let s = format_boot_time(1_761_900_000, None);
         assert!(s.starts_with("Fri"), "{s}");
+    }
+
+    #[test]
+    fn gpu_system_line_sits_name_then_readings() {
+        let g = tmog_core::gpu::GpuInfo {
+            index: 0,
+            name: "NVIDIA GeForce RTX 5090 Laptop GPU".into(),
+            busy_percent: Some(12.4),
+            mem_used_mib: Some(512),
+            mem_total_mib: Some(16384),
+            graphics_clock_mhz: Some(2100),
+            memory_clock_mhz: None,
+            power_draw_w: Some(48.2),
+            power_limit_w: None,
+            temp_c: Some(62.0),
+        };
+        assert_eq!(
+            gpu_system_line(&g),
+            "NVIDIA GeForce RTX 5090 Laptop GPU — 12.4% busy, 512/16384 MiB, 62°C, 2100 MHz, 48 W"
+        );
+        let bare = tmog_core::gpu::GpuInfo {
+            busy_percent: None,
+            mem_used_mib: None,
+            mem_total_mib: None,
+            graphics_clock_mhz: None,
+            power_draw_w: None,
+            temp_c: None,
+            ..g
+        };
+        assert_eq!(
+            gpu_system_line(&bare),
+            "NVIDIA GeForce RTX 5090 Laptop GPU — - busy, -"
+        );
     }
 
     #[test]
