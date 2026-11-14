@@ -37,7 +37,7 @@ tmog-core = { path = "crates/tmog-core" }
 # Linux-only: the GTK tray backend (see traythread).
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
-glib = "0.18"
+glib = "0.20"
 
 [dev-dependencies]
 insta = "1"
