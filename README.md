@@ -43,6 +43,21 @@ packaging/          .desktop entry + installer for KDE/GNOME menus
 docs/               headless-rendered page screenshots
 ```
 
+## Download
+
+Linux x86_64 AppImages are on the [release page](https://github.com/jcgit1/rsTMOG/releases). No Rust toolchain is required. Vulkan and the NVIDIA driver stay on your machine; the AppImage bundles GTK 3 for the tray.
+
+```sh
+chmod +x rstmog-*-x86_64.AppImage
+./rstmog-*-x86_64.AppImage
+```
+
+Rebuild it with Docker (Ubuntu 22.04, so the binary still runs on older glibc):
+
+```sh
+bash packaging/appimage/build.sh
+```
+
 ## Building
 
 ```sh
