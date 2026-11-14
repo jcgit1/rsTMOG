@@ -19,21 +19,16 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 VERSION=$("$BIN" --version | awk '{print $2}')
 [[ -n "$VERSION" ]] || { echo "could not read version from $BIN" >&2; exit 1; }
 
-# The Docker image already has these on PATH. A GitHub runner does not.
+# The Docker image already has these on PATH. A GitHub runner does not:
+# fetch the same pinned, checksum-verified releases (see tools.sh).
 if ! command -v linuxdeploy >/dev/null 2>&1 \
     || ! command -v linuxdeploy-plugin-gtk >/dev/null 2>&1 \
-    || ! command -v appimagetool >/dev/null 2>&1; then
+    || ! command -v appimagetool >/dev/null 2>&1 \
+    || [[ ! -f "${APPIMAGE_RUNTIME:-}" ]]; then
     TOOLDIR=$(mktemp -d)
-    curl -fsSL -o "$TOOLDIR/linuxdeploy" \
-        https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-    # The GTK plugin no longer publishes an AppImage. This commit is the
-    # script linuxdeploy still expects to find as linuxdeploy-plugin-gtk.
-    curl -fsSL -o "$TOOLDIR/linuxdeploy-plugin-gtk" \
-        https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/3b67a1d1c1b0c8268f57f2bce40fe2d33d409cea/linuxdeploy-plugin-gtk.sh
-    curl -fsSL -o "$TOOLDIR/appimagetool" \
-        https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-    chmod +x "$TOOLDIR/linuxdeploy" "$TOOLDIR/linuxdeploy-plugin-gtk" "$TOOLDIR/appimagetool"
+    bash "$ROOT/packaging/appimage/tools.sh" "$TOOLDIR"
     export PATH="$TOOLDIR:$PATH"
+    export APPIMAGE_RUNTIME="$TOOLDIR/runtime-x86_64"
 fi
 
 export APPIMAGE_EXTRACT_AND_RUN=1
@@ -113,7 +108,7 @@ chmod a+rx "$APPDIR/AppRun"
 
 mkdir -p "$OUT"
 DEST="$OUT/rstmog-${VERSION}-x86_64.AppImage"
-appimagetool --no-appstream "$APPDIR" "$DEST"
+appimagetool --no-appstream --runtime-file "$APPIMAGE_RUNTIME" "$APPDIR" "$DEST"
 chmod +x "$DEST"
 (
     cd "$OUT"

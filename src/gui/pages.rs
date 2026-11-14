@@ -982,11 +982,13 @@ mod tests {
         };
         let ctx = egui::Context::default();
         let width = 800.0;
-        let mut raw = egui::RawInput::default();
-        raw.screen_rect = Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(width, 1100.0),
-        ));
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 1100.0),
+            )),
+            ..Default::default()
+        };
         let full_output = ctx.run(raw, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 summary_ui(ui, &snap);

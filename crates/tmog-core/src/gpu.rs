@@ -47,15 +47,15 @@ impl Nvml {
         let name = d.name().unwrap_or_default();
         // utilization_rates errors on some driver/GPU combos -> None
         let busy = d.utilization_rates().ok().map(|u| u.gpu as f64);
-        let mem = d.memory_info().ok().map(|i| i.used / (1024 * 1024));
-        let total = d.memory_info().ok().map(|i| i.total / (1024 * 1024));
+        let meminfo = d.memory_info().ok();
+        let mem = meminfo.as_ref().map(|i| i.used / (1024 * 1024));
+        let total = meminfo.as_ref().map(|i| i.total / (1024 * 1024));
         let gclk = d.clock_info(Clock::Graphics).ok();
         let mclk = d.clock_info(Clock::Memory).ok();
         let draw = d.power_usage().ok().map(|mw| mw as f64 / 1000.0);
-        // default power limit as the stable "limit" reference
-        let limit = d.power_usage().ok().and_then(|_| d.name().ok()).and(None);
+        // the limit the driver is actually enforcing (milliwatts)
+        let limit = d.enforced_power_limit().ok().map(|mw| mw as f64 / 1000.0);
         let temp = d.temperature(TemperatureSensor::Gpu).ok().map(|t| t as f64);
-        let _ = limit;
         Some(GpuInfo {
             index,
             name,

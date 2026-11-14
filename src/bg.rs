@@ -47,8 +47,11 @@ impl SamplerHandle {
                 // effective cadence degrades gracefully.
                 while !stop_t.load(Ordering::Relaxed) {
                     let began = Instant::now();
-                    // slow-tier detail requests from the UI thread
-                    if let Ok(pids) = rx_detail.try_recv() {
+                    // slow-tier detail requests from the UI thread: the UI
+                    // sends one per frame, so drain them all and keep only
+                    // the newest (taking one per tick let the queue grow
+                    // without bound and enriched rows from minutes ago)
+                    if let Some(pids) = rx_detail.try_iter().last() {
                         sampler.request_detail(&pids);
                     }
                     sampler.tick();
@@ -137,6 +140,21 @@ mod tests {
         }
         h.shutdown();
         h.shutdown(); // idempotent
+    }
+
+    #[test]
+    fn detail_requests_do_not_pile_up() {
+        let mut h = SamplerHandle::start(2000);
+        for i in 0..1000u32 {
+            h.request_detail(&[i]);
+        }
+        // the sampler's next cycle must consume the whole backlog at once
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !h.tx_detail.is_empty() {
+            assert!(Instant::now() < deadline, "backlog never drained");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        h.shutdown();
     }
 
     #[test]

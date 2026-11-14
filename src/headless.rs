@@ -256,8 +256,20 @@ fn crc32(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xEDB88320 & (!(crc & 1)));
+            crc = (crc >> 1) ^ (0xEDB88320 & (crc & 1).wrapping_neg());
         }
     }
     !crc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc32_matches_reference() {
+        // standard CRC-32 check value, and the PNG IEND chunk CRC
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32(b"IEND"), 0xAE42_6082);
+    }
 }

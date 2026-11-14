@@ -46,24 +46,38 @@ pub fn default_path() -> PathBuf {
 
 /// Load; missing file → Default. A corrupt file is returned as an Err
 /// (the GUI shows a warning and falls back to defaults; we never silently
-/// discard a user's settings).
+/// discard a user's settings). Values are normalized, so a hand-edited
+/// `refresh_ms = 0` cannot spin the sampler at 100% CPU.
 pub fn load(path: &Path) -> Result<Settings, String> {
     match std::fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+        Ok(text) => {
+            let mut s: Settings =
+                toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            normalize(&mut s);
+            Ok(s)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
         Err(e) => Err(format!("read {}: {e}", path.display())),
     }
 }
 
 /// Serialize with unknown keys preserved: we round-trip through a
-/// toml::Value map so user-added future keys survive.
+/// toml::Value map so user-added future keys survive. If the existing file
+/// does not parse, it is copied to `config.toml.bak` before being replaced,
+/// so a typo never silently wipes the user's settings.
 pub fn save(path: &Path, s: &Settings) -> Result<(), String> {
-    let mut map: toml::Table = match std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| t.parse::<toml::Table>().ok())
-    {
-        Some(existing) => existing,
-        None => toml::Table::new(),
+    let mut map: toml::Table = match std::fs::read_to_string(path) {
+        Ok(text) => match text.parse::<toml::Table>() {
+            Ok(existing) => existing,
+            Err(_) => {
+                let bak = path.with_extension("toml.bak");
+                std::fs::write(&bak, &text)
+                    .map_err(|e| format!("back up unparsable {}: {e}", path.display()))?;
+                toml::Table::new()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
     };
     let known = s.clone().into_table();
     for (k, v) in known {
@@ -178,6 +192,30 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(&path, "this is = = not toml").unwrap();
         assert!(load(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_backs_up_an_unparsable_file() {
+        let dir = tmpdir("backup");
+        let path = dir.join("config.toml");
+        let broken = "theme = \"amber\"\nrefresh_ms = = 500\n";
+        std::fs::write(&path, broken).unwrap();
+        save(&path, &Settings::default()).unwrap();
+        let bak = std::fs::read_to_string(dir.join("config.toml.bak")).unwrap();
+        assert_eq!(bak, broken, "original text must be preserved");
+        assert_eq!(load(&path).unwrap(), Settings::default());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_normalizes_out_of_range_values() {
+        let dir = tmpdir("norm");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "refresh_ms = 0\ntheme = \"hotpink\"\n").unwrap();
+        let s = load(&path).unwrap();
+        assert_eq!(s.refresh_ms, 500);
+        assert_eq!(s.theme, "dark");
         std::fs::remove_dir_all(&dir).ok();
     }
 

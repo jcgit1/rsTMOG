@@ -36,14 +36,10 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
 ENV APPIMAGE_EXTRACT_AND_RUN=1 \
     ARCH=x86_64 \
     DEPLOY_GTK_VERSION=3
-RUN mkdir -p /opt/appimage \
-    && curl -fsSL -o /opt/appimage/linuxdeploy \
-        https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
-    && curl -fsSL -o /opt/appimage/linuxdeploy-plugin-gtk \
-        https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/3b67a1d1c1b0c8268f57f2bce40fe2d33d409cea/linuxdeploy-plugin-gtk.sh \
-    && curl -fsSL -o /opt/appimage/appimagetool \
-        https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
-    && chmod +x /opt/appimage/linuxdeploy /opt/appimage/linuxdeploy-plugin-gtk /opt/appimage/appimagetool
+# Pinned releases, SHA-256 verified (see tools.sh).
+COPY tools.sh /opt/appimage/tools.sh
+RUN bash /opt/appimage/tools.sh /opt/appimage
+ENV APPIMAGE_RUNTIME=/opt/appimage/runtime-x86_64
 
 COPY entrypoint.sh /opt/appimage/entrypoint.sh
 RUN chmod +x /opt/appimage/entrypoint.sh
