@@ -41,6 +41,18 @@ pub struct Snapshot {
     pub psi_memory: Option<(PsiAvg, Option<PsiAvg>)>,
     pub psi_io: Option<(PsiAvg, Option<PsiAvg>)>,
     pub sysinfo: Option<SysInfo>,
+    /// Slow-changing identity data, refreshed every IDENTITY_EVERY ticks
+    /// (or when a new device appears) so pages never do I/O while painting.
+    pub disk_ids: std::collections::HashMap<String, tmog_core::diskstats::DiskIdentity>,
+    pub net_ids: std::collections::HashMap<
+        String,
+        (tmog_core::netdev::NetIdentity, tmog_core::netdev::NetKind),
+    >,
+    pub cpuinfo: Option<tmog_core::cpuinfo::CpuInfo>,
+    /// cpufreq of the first present cpu (current MHz moves: every tick)
+    pub cpufreq0: Option<tmog_core::cpuinfo::Cpufreq>,
+    /// block device backing `/` (from /proc/mounts)
+    pub root_disk: Option<String>,
 
     // ---- histories (sample_index == Snapshot.tick) -------------------
     /// aggregate cpu busy %
@@ -85,9 +97,10 @@ pub struct Sampler {
     // rate baselines: name -> (last_bytes, last_us)
     prev_disk_read: std::collections::HashMap<String, (u64, u64)>,
     prev_disk_write: std::collections::HashMap<String, (u64, u64)>,
-    /// busy_ms + sampler-start time (µs) per disk at the last sample
-    /// (util% window)
-    prev_disk_busy: std::collections::HashMap<String, (u64, u64)>,
+    /// busy_ms + monotonic time per disk at the last sample (util% window)
+    prev_disk_busy: std::collections::HashMap<String, (u64, Instant)>,
+    /// monotonic origin for rate timestamps (wall clock can step backwards)
+    start: Instant,
     prev_net_rx: std::collections::HashMap<String, (u64, u64)>,
     prev_net_tx: std::collections::HashMap<String, (u64, u64)>,
     /// cumulative aggregate cpu ticks (USER_HZ) at the last row pass and
@@ -99,6 +112,13 @@ pub struct Sampler {
     last_hwmon: bool,
     /// pids the GUI asked to have fully enriched (visible slice + selected)
     detail_pids: Vec<u32>,
+    /// rotating position in `detail_pids`, so a list longer than
+    /// DETAIL_BATCH is covered over successive ticks
+    detail_cursor: usize,
+    /// a request arrived since the last tick (else the GUI left the page)
+    detail_requested: bool,
+    /// first present cpu, for the cpufreq readout (found at identity refresh)
+    cpu0: Option<usize>,
     pub snapshot: Snapshot,
 }
 
@@ -135,6 +155,7 @@ impl Sampler {
             prev_disk_read: Default::default(),
             prev_disk_write: Default::default(),
             prev_disk_busy: Default::default(),
+            start: Instant::now(),
             prev_net_rx: Default::default(),
             prev_net_tx: Default::default(),
             agg_ticks: 0,
@@ -142,6 +163,9 @@ impl Sampler {
             last_was_row: false,
             last_hwmon: false,
             detail_pids: Vec::new(),
+            detail_cursor: 0,
+            detail_requested: false,
+            cpu0: None,
             snapshot: Snapshot::default(),
         }
     }
@@ -182,14 +206,19 @@ impl Sampler {
     /// the next tick — the GUI calls this with the visible table slice
     /// plus the selected pid (slow tier).
     pub fn request_detail(&mut self, pids: &[u32]) {
+        // The cursor is deliberately NOT reset: the visible slice re-sorts
+        // every row pass, and restarting at 0 each time starved the tail.
         self.detail_pids = pids.to_vec();
+        self.detail_requested = true;
     }
 
     /// One collection pass. Cheap and panic-tolerant: any collector that
     /// fails leaves its previous snapshot value in place.
     pub fn tick(&mut self) {
         let now = Instant::now();
-        let root = self.root.as_path();
+        // owned copy so `self` can be borrowed mutably below
+        let root_buf = self.root.clone();
+        let root = root_buf.as_path();
 
         // ---- cpu ----------------------------------------------------
         if let Ok(text) = tmog_core::fs::read_under(root, "proc/stat") {
@@ -261,7 +290,9 @@ impl Sampler {
                 for pid in pids {
                     // cheap tier: stat only; status/statm/cmdline are
                     // filled on demand for visible rows (slow tier below)
-                    if let Ok(mut p) = tmog_core::process::collect_stat_only(root, pid) {
+                    if let Ok(mut p) =
+                        tmog_core::process::collect_row(root, pid, PAGE_BYTES, &self.passwd)
+                    {
                         // carry enriched detail forward if the pid was
                         // known last pass (cheap: no syscalls)
                         if let Some(prev_full) =
@@ -286,7 +317,9 @@ impl Sampler {
                         // aggregate ticks accumulated SINCE the previous
                         // row pass (since_ticks covers all ticks, so use
                         // it directly — it equals the row window)
-                        let total_delta = (self.agg_ticks - self.row_pass_ticks).max(1);
+                        // saturating: totals can step back (containers with a
+                        // virtualized /proc/stat); never underflow/panic
+                        let total_delta = self.agg_ticks.saturating_sub(self.row_pass_ticks).max(1);
                         let cpu_pct = prev.and_then(|pv| {
                             tmog_core::process_table::cpu_percent(pv, &p, total_delta)
                         });
@@ -316,20 +349,15 @@ impl Sampler {
             // live util% per disk: busy_ms delta over real elapsed time
             // since the previous disk sample. First sample / restarted
             // counters → None (dash), never a fabricated spike.
-            let now_us = std::time::UNIX_EPOCH
-                .elapsed()
-                .map(|d| d.as_micros() as u64)
-                .unwrap_or(0);
             let mut utils = Vec::with_capacity(d.len());
             for c in &d {
-                let u = match self.prev_disk_busy.get(&c.name) {
-                    Some((prev_busy, prev_us)) => {
-                        tmog_core::diskstats::util_percent(*prev_busy, c.busy_ms, now_us - prev_us)
-                    }
-                    None => None,
-                };
-                self.prev_disk_busy
-                    .insert(c.name.clone(), (c.busy_ms, now_us));
+                let u = self
+                    .prev_disk_busy
+                    .get(&c.name)
+                    .and_then(|&(prev_busy, prev_at)| {
+                        disk_util(prev_busy, prev_at, c.busy_ms, now)
+                    });
+                self.prev_disk_busy.insert(c.name.clone(), (c.busy_ms, now));
                 utils.push((c.name.clone(), u));
             }
             self.snapshot.disk_util = utils;
@@ -374,33 +402,40 @@ impl Sampler {
         // Batched: at most DETAIL_BATCH per tick so a burst of requests
         // (fast scroll) never spikes a tick; a backlog is simply served
         // over the next few ticks.
+        // A list longer than the batch is walked round-robin across ticks
+        // (the GUI re-sends ~41 pids every frame; serving only the first 25
+        // left the rest of the visible rows permanently blank).
         if !self.detail_pids.is_empty() {
-            let want = std::mem::take(&mut self.detail_pids);
-            for pid in want.iter().take(DETAIL_BATCH) {
-                if let Some(row) = self.snapshot.procs.iter_mut().find(|r| r.proc.pid == *pid) {
+            let n = self.detail_pids.len();
+            let start = self.detail_cursor % n;
+            let take = DETAIL_BATCH.min(n);
+            for k in 0..take {
+                let pid = self.detail_pids[(start + k) % n];
+                if let Some(row) = self.snapshot.procs.iter_mut().find(|r| r.proc.pid == pid) {
                     tmog_core::process::enrich_one(
                         root,
-                        *pid,
+                        pid,
                         PAGE_BYTES,
                         &self.passwd,
                         &mut row.proc,
                     );
                 }
             }
-            // anything beyond the batch goes back for next tick
-            if want.len() > DETAIL_BATCH {
-                self.detail_pids = want[DETAIL_BATCH..].to_vec();
+            self.detail_cursor = (start + take) % n;
+            if !self.detail_requested {
+                self.detail_pids.clear(); // the GUI stopped asking
             }
+            self.detail_requested = false;
         }
+
+        // ---- identities (slow-changing; never read from the paint path)
+        self.refresh_identities(root);
 
         // ---- histories ----------------------------------------------
         self.tick += 1;
         let t = self.tick;
         self.snapshot.tick = t;
-        let now_us = std::time::UNIX_EPOCH
-            .elapsed()
-            .map(|d| d.as_micros() as u64)
-            .unwrap_or(0);
+        let now_us = now.duration_since(self.start).as_micros() as u64;
 
         let push = |hist: &mut Vec<(u64, f64)>, v: Option<f64>| {
             let v = v.unwrap_or(f64::NAN);
@@ -494,6 +529,60 @@ impl Sampler {
     }
 }
 
+impl Sampler {
+    /// Disk/net identity, cpuinfo and the root disk change rarely: refresh
+    /// every IDENTITY_EVERY ticks, or at once when a device without an
+    /// entry shows up. cpufreq's current MHz moves, so it is read per tick.
+    fn refresh_identities(&mut self, root: &std::path::Path) {
+        use tmog_core::{cpuinfo, diskstats, netdev};
+        let snap = &mut self.snapshot;
+        let new_device = snap.disks.iter().any(|d| {
+            diskstats::is_physical_candidate(&d.name) && !snap.disk_ids.contains_key(&d.name)
+        }) || snap
+            .nets
+            .iter()
+            .any(|n| n.name != "lo" && !snap.net_ids.contains_key(&n.name));
+        if self.tick.is_multiple_of(IDENTITY_EVERY) || new_device {
+            snap.disk_ids = snap
+                .disks
+                .iter()
+                .filter(|d| diskstats::is_physical_candidate(&d.name))
+                .map(|d| (d.name.clone(), diskstats::read_identity(root, &d.name)))
+                .collect();
+            let names: Vec<String> = snap
+                .nets
+                .iter()
+                .filter(|n| n.name != "lo")
+                .map(|n| n.name.clone())
+                .collect();
+            snap.net_ids = netdev::read_identities(root, &names)
+                .into_iter()
+                .map(|id| {
+                    let kind = id.kind(root);
+                    (id.name.clone(), (id, kind))
+                })
+                .collect();
+            snap.cpuinfo = cpuinfo::collect(root).ok();
+            self.cpu0 = cpuinfo::present_cpus(root).first().copied();
+            snap.root_disk = tmog_core::fs::read_under(root, "proc/mounts")
+                .ok()
+                .and_then(|m| diskstats::root_disk_from_mounts(&m));
+        }
+        snap.cpufreq0 = self.cpu0.map(|c| cpuinfo::read_cpufreq(root, c));
+    }
+}
+
+/// Disk busy % since the previous sample. `busy_ms` is in milliseconds,
+/// so the window must be too (it used to be passed in microseconds, which
+/// made every reading 1000x too low).
+fn disk_util(prev_busy_ms: u64, prev_at: Instant, busy_ms: u64, now: Instant) -> Option<f64> {
+    let elapsed_ms = now.checked_duration_since(prev_at)?.as_millis() as u64;
+    tmog_core::diskstats::util_percent(prev_busy_ms, busy_ms, elapsed_ms)
+}
+
+/// Identity refresh cadence, in ticks.
+const IDENTITY_EVERY: u64 = 10;
+
 fn read_pids(root: &std::path::Path) -> Result<Vec<u32>, String> {
     Ok(tmog_core::process::list_pids(root))
 }
@@ -520,5 +609,70 @@ mod tests {
         assert!(!s.snapshot.nets.is_empty());
         assert!(s.snapshot.sysinfo.is_some());
         assert!(s.snapshot.cpu_ticks_delta > 0);
+        assert!(
+            s.snapshot.cpuinfo.is_some(),
+            "identities refreshed by the sampler"
+        );
+    }
+
+    #[test]
+    fn disk_util_uses_milliseconds() {
+        // 240 ms busy over a 1000 ms window is 24%, not 0.024%
+        let t0 = Instant::now();
+        let t1 = t0 + std::time::Duration::from_millis(1000);
+        let u = disk_util(1_000, t0, 1_240, t1).unwrap();
+        assert!((u - 24.0).abs() < 0.01, "{u}");
+        // a window that runs backwards yields None, never a panic
+        assert_eq!(disk_util(0, t1, 10, t0), None);
+    }
+
+    #[test]
+    fn detail_requests_longer_than_a_batch_are_all_served() {
+        let mut s = Sampler::new();
+        s.tick();
+        // the GUI's shape: ~41 pids re-sent before every tick
+        let pids: Vec<u32> = s
+            .snapshot
+            .procs
+            .iter()
+            .filter(|r| r.proc.pid > 2)
+            .take(DETAIL_BATCH + 16)
+            .map(|r| r.proc.pid)
+            .collect();
+        assert!(pids.len() > DETAIL_BATCH, "need more pids than one batch");
+        // statm is a slow-tier-only read: use a sentinel to see enrichment
+        for r in s.snapshot.procs.iter_mut() {
+            r.proc.vm_swap_kib = u64::MAX;
+        }
+        for _ in 0..2 {
+            s.request_detail(&pids);
+            s.tick();
+        }
+        let missed: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|p| {
+                s.snapshot
+                    .procs
+                    .iter()
+                    .any(|r| r.proc.pid == *p && r.proc.vm_swap_kib == u64::MAX)
+            })
+            .collect();
+        assert!(missed.is_empty(), "never enriched: {missed:?}");
+    }
+
+    #[test]
+    fn every_row_has_rss_and_owner_without_enrichment() {
+        let mut s = Sampler::new();
+        s.tick();
+        let me = std::process::id();
+        let row = s
+            .snapshot
+            .procs
+            .iter()
+            .find(|r| r.proc.pid == me)
+            .expect("self");
+        assert!(row.proc.rss_bytes > 0, "rss from stat");
+        assert!(row.proc.uid.is_some(), "owner from /proc/<pid>");
     }
 }

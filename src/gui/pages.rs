@@ -226,9 +226,9 @@ fn cpu_summary_line(s: &Snapshot) -> String {
 
 /// Root disk read/write rates and busy %. None when `/` is not a block device.
 fn root_disk_readout(s: &Snapshot) -> Option<String> {
-    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
-    let name = tmog_core::diskstats::root_disk_from_mounts(&mounts)?;
-    Some(format_root_disk(&name, s))
+    // resolved by the sampler (no file I/O while painting)
+    let name = s.root_disk.as_deref()?;
+    Some(format_root_disk(name, s))
 }
 
 fn format_root_disk(name: &str, s: &Snapshot) -> String {
@@ -294,9 +294,8 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
         super::graph::graph_ui(ui, &m, 90.0);
         ui.add_space(8.0);
     }
-    // topology + freq/governor header (live from sysfs; cheap files)
-    let root = std::path::Path::new("/");
-    if let Ok(ci) = tmog_core::cpuinfo::collect(root) {
+    // topology + freq/governor header (collected by the sampler)
+    if let Some(ci) = &s.cpuinfo {
         ui.label(
             egui::RichText::new(format!(
                 "{} — {} threads, {} cores, {} socket(s)",
@@ -304,8 +303,7 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
             ))
             .weak(),
         );
-        if let Some(c0) = tmog_core::cpuinfo::present_cpus(root).first().copied() {
-            let f = tmog_core::cpuinfo::read_cpufreq(root, c0);
+        if let Some(f) = &s.cpufreq0 {
             let mhz = |k: Option<u64>| {
                 k.map(|k| format!("{:.0} MHz", k as f64 / 1000.0))
                     .unwrap_or_else(|| "-".into())
@@ -585,7 +583,14 @@ pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
         if !tmog_core::diskstats::is_physical_candidate(&d.name) {
             continue;
         }
-        let id = tmog_core::diskstats::read_identity(std::path::Path::new("/"), &d.name);
+        let id = s
+            .disk_ids
+            .get(&d.name)
+            .cloned()
+            .unwrap_or(tmog_core::diskstats::DiskIdentity {
+                model: None,
+                rotational: None,
+            });
         let util = s
             .disk_util
             .iter()
@@ -658,8 +663,15 @@ pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
             // interface — exact per-interface mapping from the kernel's
             // route/link tables (netlink) and if_inet6, no heuristics.
             // Virtual interfaces intentionally show no prefix.
-            let id = tmog_core::netdev::read_identity(std::path::Path::new("/"), &n.name);
-            let kind = id.kind(std::path::Path::new("/"));
+            // identity + kind come from the sampler (netlink dumps used
+            // to run here, per interface, on every frame)
+            let Some((id, kind)) = s.net_ids.get(&n.name) else {
+                ui.label(egui::RichText::new(&n.name).strong());
+                ui.label(format!("rx {} MB", n.rx_bytes / 1_000_000));
+                ui.label(format!("tx {} MB", n.tx_bytes / 1_000_000));
+                return;
+            };
+            let kind = *kind;
             let my_ip = if kind == tmog_core::netdev::NetKind::Virtual {
                 None
             } else if let Some(a) = id.ipv6.first() {
@@ -838,7 +850,7 @@ pub fn system_ui(ui: &mut egui::Ui, s: &Snapshot) {
             });
     }
     // cpu model from cpuinfo live
-    if let Ok(ci) = tmog_core::cpuinfo::collect(std::path::Path::new("/")) {
+    if let Some(ci) = &s.cpuinfo {
         ui.label(format!(
             "{} ({} logical, {} cores)",
             ci.model, ci.logical, ci.cores

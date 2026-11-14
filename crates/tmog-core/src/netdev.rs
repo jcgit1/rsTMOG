@@ -77,6 +77,32 @@ pub enum NetKind {
 }
 
 pub fn read_identity(sys_root: &Path, name: &str) -> NetIdentity {
+    identity_with_v4(sys_root, name, iface_v4(name))
+}
+
+/// Identities for many interfaces with ONE netlink link dump and ONE route
+/// dump in total (`read_identity` does both per interface). For callers
+/// that refresh every interface at once, i.e. the sampler.
+pub fn read_identities(sys_root: &Path, names: &[String]) -> Vec<NetIdentity> {
+    let dumps = nl_dump(NL_RTM_GETLINK, &[0u8; 12]).and_then(|links| {
+        let mut payload = [0u8; 12];
+        payload[0] = 2; // AF_INET
+        payload[4] = 254; // RT_TABLE_MAIN
+        nl_dump(NL_RTM_GETROUTE, &payload).map(|routes| (parse_link_names(&links), routes))
+    });
+    names
+        .iter()
+        .map(|name| {
+            let v4 = match &dumps {
+                Some((links, routes)) => parse_local_v4(routes, links, name),
+                None => Vec::new(),
+            };
+            identity_with_v4(sys_root, name, v4)
+        })
+        .collect()
+}
+
+fn identity_with_v4(sys_root: &Path, name: &str, mut v4: Vec<Ipv4Addr>) -> NetIdentity {
     let rel = |f: &str| format!("sys/class/net/{name}/{f}");
     let txt = |f: &str| {
         fs::read_under(sys_root, &rel(f))
@@ -86,10 +112,7 @@ pub fn read_identity(sys_root: &Path, name: &str) -> NetIdentity {
     let speed = fs::read_u64_under(sys_root, &rel("speed"))
         .ok()
         .filter(|&s| s > 0); // -1/0 on wifi/virtual -> None
-    let type_num = fs::read_u64_under(sys_root, &rel("type")).unwrap_or(99);
-    let kind = kind_of(name, type_num, txt("wireless").as_deref());
-    let _ = kind; // identity keeps raw fields; kind() is a method below
-    let (mut v4, mut v6) = (iface_v4(name), iface_v6(sys_root, name));
+    let mut v6 = iface_v6(sys_root, name);
     v4.sort();
     v4.dedup();
     v6.sort();
@@ -155,7 +178,18 @@ unsafe extern "C" {
     fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize;
     fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize;
     fn close(fd: i32) -> i32;
+    fn setsockopt(fd: i32, level: i32, name: i32, val: *const Timeval, len: u32) -> i32;
 }
+
+#[repr(C)]
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+const SOL_SOCKET: i32 = 1;
+const SO_RCVTIMEO: i32 = 20;
+/// A dump bigger than this is not a route table; stop rather than grow.
+const NL_MAX_DUMP: usize = 16 << 20;
 
 fn u32le(b: &[u8], i: usize) -> u32 {
     (b[i] as u32) | (b[i + 1] as u32) << 8 | (b[i + 2] as u32) << 16 | (b[i + 3] as u32) << 24
@@ -186,6 +220,23 @@ fn nl_dump(msg_type: u16, payload: &[u8]) -> Option<Vec<u8>> {
             pid: 0,
             groups: 0,
         };
+        // never block forever if the kernel reply stalls (recv then fails
+        // with EAGAIN after 1 s and we degrade to "no addresses")
+        let tv = Timeval {
+            tv_sec: 1,
+            tv_usec: 0,
+        };
+        if setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &tv,
+            std::mem::size_of::<Timeval>() as u32,
+        ) != 0
+        {
+            close(fd);
+            return None;
+        }
         if connect(fd, &addr, std::mem::size_of::<SockaddrNl>() as u32) != 0 {
             close(fd);
             return None;
@@ -204,6 +255,10 @@ fn nl_dump(msg_type: u16, payload: &[u8]) -> Option<Vec<u8>> {
                 return None;
             }
             out.extend_from_slice(&buf[..n as usize]);
+            if out.len() > NL_MAX_DUMP {
+                close(fd);
+                return None;
+            }
             // Scan the ENTIRE accumulated buffer every pass: DONE may sit
             // mid-chunk or at the start of the next one — the earlier
             // per-chunk scan missed it and discarded the whole dump
