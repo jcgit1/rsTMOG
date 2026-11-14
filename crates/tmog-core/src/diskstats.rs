@@ -110,12 +110,12 @@ pub fn physical_disk_name(name: &str) -> String {
     if !looks_like_partition(name) {
         return name.to_string();
     }
-    if name.starts_with("nvme") || name.starts_with("mmcblk") {
-        if let Some(idx) = name.rfind('p') {
-            let tail = &name[idx + 1..];
-            if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
-                return name[..idx].to_string();
-            }
+    if (name.starts_with("nvme") || name.starts_with("mmcblk"))
+        && let Some(idx) = name.rfind('p')
+    {
+        let tail = &name[idx + 1..];
+        if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+            return name[..idx].to_string();
         }
     }
     let bare = name.trim_end_matches(|c: char| c.is_ascii_digit());
