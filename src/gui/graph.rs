@@ -401,17 +401,6 @@ mod capture_tests {
     }
 }
 
-/// `graph_ui` with an explicit width (0 = fill available).
-pub fn graph_ui_w(ui: &mut egui::Ui, model: &GraphModel, height: f32, width: f32) {
-    let w = if width > 0.0 {
-        width
-    } else {
-        ui.available_width()
-    };
-    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(w, height), egui::Sense::hover());
-    model.paint(ui, rect);
-}
-
 #[cfg(test)]
 mod label_tests {
     use super::*;
