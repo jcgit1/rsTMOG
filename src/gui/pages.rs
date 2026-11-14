@@ -92,8 +92,18 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
         .spacing([24.0, 6.0])
         .show(ui, |ui| {
             ui.label("CPU");
-            ui.label(format!("{} busy", dash(s.aggregate, "%")));
+            ui.label(cpu_summary_line(s));
             ui.end_row();
+            if let Some(g) = &s.gpu {
+                ui.label("GPU");
+                ui.label(gpu_summary_line(g));
+                ui.end_row();
+            }
+            if let Some(line) = root_disk_readout(s) {
+                ui.label("Disk");
+                ui.label(line);
+                ui.end_row();
+            }
             if let Some(m) = s.mem_arc_adjusted.as_ref().or(s.mem.as_ref()) {
                 ui.label("Memory");
                 let arc = s
@@ -118,45 +128,14 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 ui.label(format!("{:.2}  {:.2}  {:.2}", l.one, l.five, l.fifteen));
                 ui.end_row();
             }
-            if let Some(t) = &s.cpu_temp {
-                ui.label("Temp");
-                ui.label(format!("{:.0}°C  ({})", t.value, t.label));
-                ui.end_row();
-            }
-            if let Some(g) = &s.gpu {
-                // Blank row: egui's grid ignores add_space, and a 6 px
-                // row gap left this field sitting on the CPU temp line.
-                let _ = ui.allocate_exact_size(egui::vec2(0.0, 16.0), egui::Sense::hover());
-                ui.end_row();
-                ui.label("GPU");
-                let mem = match (g.mem_used_mib, g.mem_total_mib) {
-                    (Some(u), Some(t)) => format!("{u}/{t} MiB"),
-                    _ => "-".into(),
-                };
-                let temp = g
-                    .temp_c
-                    .map(|c| format!(", {c:.0}°C"))
-                    .unwrap_or_default();
-                ui.label(format!(
-                    "{} — {} busy, {}{}{}{}",
-                    g.name,
-                    dash(g.busy_percent, "%"),
-                    mem,
-                    temp,
-                    g.power_draw_w
-                        .map(|w| format!(", {w:.0} W"))
-                        .unwrap_or_default(),
-                    g.power_limit_w
-                        .map(|w| format!(" / {w:.0} W limit"))
-                        .unwrap_or_default(),
-                ));
-                ui.end_row();
-            }
         });
-    // GPU % history rides the same scrolling-graph widget as the CPU;
+    // GPU histories ride the same scrolling-graph widget as the CPU;
     // only drawn when NVML is present (no GPU → no empty frame).
     let gpu_hist = s.hist_gpu.as_deref().unwrap_or(&[]);
-    let show_graphs = !s.hist_cpu.is_empty() || !s.hist_temp.is_empty() || !gpu_hist.is_empty();
+    let gpu_temp = s.hist_gpu_temp.as_deref().unwrap_or(&[]);
+    let gpu_temp_live = gpu_temp.iter().any(|(_, v)| v.is_finite());
+    let show_graphs =
+        !s.hist_cpu.is_empty() || !s.hist_temp.is_empty() || !gpu_hist.is_empty() || gpu_temp_live;
     if show_graphs {
         // Separator between the readout grid and the graph strip — the
         // pattern task managers use to split the stat section from the
@@ -165,69 +144,139 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            // fixed column width: `available_width` inside a horizontal
-            // row reports the whole remaining width, so a graph asked to
-            // fill it consumed the entire row and clipped every later
-            // column (this is why the GPU graph never showed). 350 px per
-            // column fits three side by side in the default window and
-            // scrolls horizontally past that.
-            let col = 330.0_f32;
-            ui.push_id("graphs", |ui| {
-                ui.spacing_mut().item_spacing.x = 20.0;
-                if !s.hist_cpu.is_empty() {
-                    let m = hist_model(
-                        "cpu",
-                        egui::Color32::from_rgb(80, 200, 120),
-                        &s.hist_cpu,
-                        60,
-                        true,
-                        "",
-                    );
-                    ui.vertical(|ui| {
-                        ui.label("CPU %");
-                        ui.add_space(2.0);
-                        super::graph::graph_ui_w(ui, &m, 90.0, col);
-                    });
-                }
-                if !gpu_hist.is_empty() {
-                    let m = hist_model(
-                        "gpu",
-                        egui::Color32::from_rgb(150, 120, 230),
-                        gpu_hist,
-                        60,
-                        true,
-                        "",
-                    );
-                    ui.vertical(|ui| {
-                        ui.label("GPU %");
-                        ui.add_space(2.0);
-                        super::graph::graph_ui_w(ui, &m, 90.0, col);
-                    });
-                }
-                if !s.hist_temp.is_empty() {
-                    let m = hist_model(
-                        "temp",
-                        egui::Color32::from_rgb(230, 140, 60),
-                        &s.hist_temp,
-                        60,
-                        false,
-                        " °C",
-                    );
-                    ui.vertical(|ui| {
-                        let cur = s
-                            .hist_temp
-                            .last()
-                            .map(|(_, v)| format!("  — {:.0} °C", v))
-                            .unwrap_or_default();
-                        ui.label(format!("CPU temp °C{cur}"));
-                        ui.add_space(2.0);
-                        super::graph::graph_ui_w(ui, &m, 90.0, col);
-                    });
-                }
-            });
+        // One graph per line. A shared horizontal row painted the CPU
+        // and GPU traces on top of each other.
+        let celsius = |hist: &[(u64, f64)]| {
+            hist.last()
+                .filter(|(_, v)| v.is_finite())
+                .map(|(_, v)| format!("  — {v:.0} °C"))
+                .unwrap_or_default()
+        };
+        let mut cells: Vec<(String, GraphModel)> = Vec::new();
+        if !s.hist_cpu.is_empty() {
+            cells.push((
+                "CPU %".into(),
+                hist_model(
+                    "cpu",
+                    egui::Color32::from_rgb(80, 200, 120),
+                    &s.hist_cpu,
+                    60,
+                    true,
+                    "",
+                ),
+            ));
+        }
+        if !gpu_hist.is_empty() {
+            cells.push((
+                "GPU %".into(),
+                hist_model(
+                    "gpu",
+                    egui::Color32::from_rgb(150, 120, 230),
+                    gpu_hist,
+                    60,
+                    true,
+                    "",
+                ),
+            ));
+        }
+        if !s.hist_temp.is_empty() {
+            cells.push((
+                format!("CPU temp °C{}", celsius(&s.hist_temp)),
+                hist_model(
+                    "temp",
+                    egui::Color32::from_rgb(230, 140, 60),
+                    &s.hist_temp,
+                    60,
+                    false,
+                    " °C",
+                ),
+            ));
+        }
+        if gpu_temp_live {
+            cells.push((
+                format!("GPU temp °C{}", celsius(gpu_temp)),
+                hist_model(
+                    "gpu_temp",
+                    egui::Color32::from_rgb(220, 90, 80),
+                    gpu_temp,
+                    60,
+                    false,
+                    " °C",
+                ),
+            ));
+        }
+        ui.push_id("graphs", |ui| {
+            for (title, model) in cells {
+                ui.label(title);
+                ui.add_space(2.0);
+                super::graph::graph_ui(ui, &model, 90.0);
+                ui.add_space(8.0);
+            }
         });
     }
+}
+
+fn cpu_summary_line(s: &Snapshot) -> String {
+    let busy = format!("{} busy", dash(s.aggregate, "%"));
+    match &s.cpu_temp {
+        Some(t) => format!("{busy}, {:.0}°C ({})", t.value, t.label),
+        None => busy,
+    }
+}
+
+/// Root disk read/write rates and busy %. None when `/` is not a block device.
+fn root_disk_readout(s: &Snapshot) -> Option<String> {
+    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+    let name = tmog_core::diskstats::root_disk_from_mounts(&mounts)?;
+    Some(format_root_disk(&name, s))
+}
+
+fn format_root_disk(name: &str, s: &Snapshot) -> String {
+    let hist = s.hist_disk.iter().find(|e| e.0 == name);
+    let read = hist.and_then(|(_, r, _)| r.last()).map(|(_, v)| *v);
+    let write = hist.and_then(|(_, _, w)| w.last()).map(|(_, v)| *v);
+    let busy = s
+        .disk_util
+        .iter()
+        .find(|(n, _)| n == name)
+        .and_then(|(_, u)| *u);
+    format!(
+        "{name}  read {}  write {}  busy {}",
+        rate_mb(read),
+        rate_mb(write),
+        match busy {
+            Some(u) => format!("{u:.0}%"),
+            None => "-".into(),
+        }
+    )
+}
+
+fn rate_mb(bytes_per_sec: Option<f64>) -> String {
+    match bytes_per_sec {
+        Some(b) if b.is_finite() => format!("{:.1} MB/s", b / 1_000_000.0),
+        _ => "-".into(),
+    }
+}
+
+fn gpu_summary_line(g: &tmog_core::gpu::GpuInfo) -> String {
+    let mem = match (g.mem_used_mib, g.mem_total_mib) {
+        (Some(u), Some(t)) => format!("{u}/{t} MiB"),
+        _ => "-".into(),
+    };
+    let temp = g.temp_c.map(|c| format!(", {c:.0}°C")).unwrap_or_default();
+    format!(
+        "{} — {} busy, {}{}{}{}",
+        g.name,
+        dash(g.busy_percent, "%"),
+        mem,
+        temp,
+        g.power_draw_w
+            .map(|w| format!(", {w:.0} W"))
+            .unwrap_or_default(),
+        g.power_limit_w
+            .map(|w| format!(" / {w:.0} W limit"))
+            .unwrap_or_default(),
+    )
 }
 
 pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize>) {
@@ -890,6 +939,213 @@ mod tests {
         assert_eq!(
             gpu_system_line(&bare),
             "NVIDIA GeForce RTX 5090 Laptop GPU — - busy, -"
+        );
+    }
+
+    /// Summary graphs are one per line: CPU %, then GPU %, then the
+    /// temperature graphs. A shared row painted the CPU and GPU traces
+    /// on top of each other.
+    #[test]
+    fn summary_graphs_stack_cpu_above_gpu() {
+        let series = |v: f64| (0u64..40).map(|t| (t, v)).collect::<Vec<_>>();
+        let snap = Snapshot {
+            hist_cpu: series(20.0),
+            hist_gpu: Some(series(30.0)),
+            hist_temp: series(55.0),
+            hist_gpu_temp: Some(series(62.0)),
+            load: Some(tmog_core::loadavg::LoadAvg {
+                one: 1.0,
+                five: 1.0,
+                fifteen: 1.0,
+                running: 1,
+                total: 2,
+            }),
+            cpu_temp: Some(tmog_core::hwmon::Reading {
+                chip: "k10temp".into(),
+                label: "Tctl".into(),
+                kind: tmog_core::hwmon::SensorKind::Temp,
+                value: 60.0,
+            }),
+            gpu: Some(tmog_core::gpu::GpuInfo {
+                index: 0,
+                name: "NVIDIA GeForce RTX 5090 Laptop GPU".into(),
+                busy_percent: Some(2.0),
+                mem_used_mib: Some(248),
+                mem_total_mib: Some(24463),
+                graphics_clock_mhz: None,
+                memory_clock_mhz: None,
+                power_draw_w: Some(21.0),
+                power_limit_w: None,
+                temp_c: Some(44.0),
+            }),
+            ..Snapshot::default()
+        };
+        let ctx = egui::Context::default();
+        let width = 800.0;
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(width, 1100.0),
+        ));
+        let full_output = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                summary_ui(ui, &snap);
+            });
+        });
+        let mut texts = Vec::new();
+        let mut labels = Vec::new();
+        fn collect_text(
+            shape: &egui::epaint::Shape,
+            texts: &mut Vec<String>,
+            labels: &mut Vec<(f32, f32, String)>,
+        ) {
+            match shape {
+                egui::epaint::Shape::Text(ts) => {
+                    let text = ts.galley.text().to_owned();
+                    labels.push((ts.pos.x, ts.pos.y, text.clone()));
+                    texts.push(text);
+                }
+                egui::epaint::Shape::Vec(v) => {
+                    for s in v {
+                        collect_text(s, texts, labels);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for clipped_shape in &full_output.shapes {
+            collect_text(&clipped_shape.shape, &mut texts, &mut labels);
+        }
+        let clipped = ctx.tessellate(full_output.shapes, 1.0);
+        let mut green = Vec::new();
+        let mut purple = Vec::new();
+        let mut orange = Vec::new();
+        let mut red = Vec::new();
+        for c in &clipped {
+            let mesh = match &c.primitive {
+                egui::epaint::Primitive::Mesh(m) => m,
+                egui::epaint::Primitive::Callback(_) => continue,
+            };
+            for v in mesh.vertices.iter() {
+                let (r, g, b) = (v.color.r(), v.color.g(), v.color.b());
+                let p = (v.pos.x, v.pos.y);
+                if r < 110 && g > 160 && b > 80 && b < 160 {
+                    green.push(p);
+                } else if r > 120 && r < 180 && g > 90 && g < 150 && b > 200 {
+                    purple.push(p);
+                } else if r > 200 && g > 110 && g < 170 && b < 90 {
+                    orange.push(p);
+                } else if r > 190 && g > 60 && g < 120 && b > 50 && b < 110 {
+                    red.push(p);
+                }
+            }
+        }
+        let mean = |pts: &[(f32, f32)]| {
+            let n = pts.len() as f32;
+            let (sx, sy) = pts.iter().fold((0.0, 0.0), |(x, y), p| (x + p.0, y + p.1));
+            (sx / n, sy / n)
+        };
+        assert!(!green.is_empty(), "CPU % trace missing");
+        assert!(!purple.is_empty(), "GPU % trace missing");
+        assert!(!orange.is_empty(), "CPU temp trace missing");
+        assert!(!red.is_empty(), "GPU temp trace missing");
+        let (gx, gy) = mean(&green);
+        let (px, py) = mean(&purple);
+        let (ox, oy) = mean(&orange);
+        let (rx, ry) = mean(&red);
+        assert!(
+            (gx - px).abs() < 40.0,
+            "CPU % and GPU % should share a column, got x {gx} vs {px}"
+        );
+        assert!(
+            py > gy + 40.0,
+            "GPU % should be the line under CPU %, y {py} vs {gy}"
+        );
+        assert!(
+            (ox - rx).abs() < 40.0,
+            "temperature graphs should share a column, got x {ox} vs {rx}"
+        );
+        assert!(
+            oy > py + 40.0,
+            "CPU temp should be below GPU %, y {oy} vs {py}"
+        );
+        assert!(
+            ry > oy + 40.0,
+            "GPU temp should be the line under CPU temp, y {ry} vs {oy}"
+        );
+        assert!(rx < width, "GPU temp clipped past the panel, x={rx}");
+        let pos_of = |name: &str| -> (f32, f32) {
+            labels
+                .iter()
+                .find(|(_, _, t)| t == name)
+                .map(|(x, y, _)| (*x, *y))
+                .unwrap_or_else(|| panic!("{name} label missing, got {labels:?}"))
+        };
+        let (cpu_x, cpu_y) = pos_of("CPU");
+        let (gpu_x, gpu_y) = pos_of("GPU");
+        let (_, load_y) = pos_of("Load");
+        assert!(
+            gpu_y > cpu_y + 8.0,
+            "GPU readout should be the line under CPU, y {gpu_y} vs {cpu_y}"
+        );
+        assert!(
+            load_y > gpu_y + 8.0,
+            "Load should stay below the GPU line, y {load_y} vs {gpu_y}"
+        );
+        assert!(
+            (gpu_x - cpu_x).abs() < 0.5,
+            "GPU label should share the CPU column, x {gpu_x} vs {cpu_x}"
+        );
+        let val_x = |prefix: &str| {
+            labels
+                .iter()
+                .find(|(_, _, t)| t.starts_with(prefix))
+                .map(|(x, _, _)| *x)
+                .unwrap_or_else(|| panic!("{prefix} value missing"))
+        };
+        let cpu_val = labels
+            .iter()
+            .find(|(_, _, t)| t.contains("60°C"))
+            .map(|(x, _, _)| *x)
+            .expect("CPU line should carry its temperature");
+        let gpu_val = val_x("NVIDIA");
+        assert!(
+            (gpu_val - cpu_val).abs() < 0.5,
+            "GPU value should share the value column, x {gpu_val} vs {cpu_val}"
+        );
+        let celsius: Vec<_> = texts.iter().filter(|t| t.contains("°C")).collect();
+        assert!(
+            celsius.iter().any(|t| t.contains("CPU temp")),
+            "CPU temp title missing Celsius, texts={texts:?}"
+        );
+        assert!(
+            celsius.iter().any(|t| t.contains("GPU temp")),
+            "GPU temp title missing Celsius, texts={texts:?}"
+        );
+    }
+
+    #[test]
+    fn cpu_line_keeps_temperature_and_disk_line_is_root_io() {
+        let snap = Snapshot {
+            aggregate: Some(6.1),
+            cpu_temp: Some(tmog_core::hwmon::Reading {
+                chip: "k10temp".into(),
+                label: "Tctl".into(),
+                kind: tmog_core::hwmon::SensorKind::Temp,
+                value: 78.0,
+            }),
+            hist_disk: vec![(
+                "nvme1n1".into(),
+                vec![(1, 1_500_000.0)],
+                vec![(1, 200_000.0)],
+            )],
+            disk_util: vec![("nvme1n1".into(), Some(4.2))],
+            ..Snapshot::default()
+        };
+        assert_eq!(cpu_summary_line(&snap), "6.1% busy, 78°C (Tctl)");
+        assert_eq!(
+            format_root_disk("nvme1n1", &snap),
+            "nvme1n1  read 1.5 MB/s  write 0.2 MB/s  busy 4%"
         );
     }
 

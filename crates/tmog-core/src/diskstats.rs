@@ -103,6 +103,52 @@ pub fn read_identity(sysfs_root: &Path, name: &str) -> DiskIdentity {
     }
 }
 
+/// Whole disk that owns `name`. A partition (`nvme1n1p2`, `sda1`) maps to
+/// its disk; a disk name is returned unchanged. Rates are sampled on the
+/// disk, not the partition.
+pub fn physical_disk_name(name: &str) -> String {
+    if !looks_like_partition(name) {
+        return name.to_string();
+    }
+    if name.starts_with("nvme") || name.starts_with("mmcblk") {
+        if let Some(idx) = name.rfind('p') {
+            let tail = &name[idx + 1..];
+            if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+                return name[..idx].to_string();
+            }
+        }
+    }
+    let bare = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    if bare.is_empty() {
+        name.to_string()
+    } else {
+        bare.to_string()
+    }
+}
+
+/// Block device that holds `/`, reduced to the physical disk we sample.
+/// `text` is `/proc/mounts`. Non-block roots (overlay, tmpfs) yield None.
+pub fn root_disk_from_mounts(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(dev) = parts.next() else { continue };
+        let Some(mnt) = parts.next() else { continue };
+        if mnt != "/" {
+            continue;
+        }
+        // tmpfs, overlay, and btrfs subvolume ids are not disks we sample.
+        if !dev.starts_with("/dev/") {
+            return None;
+        }
+        let name = dev.rsplit('/').next().unwrap_or(dev);
+        if name.is_empty() || !is_physical_candidate(name) {
+            return None;
+        }
+        return Some(physical_disk_name(name));
+    }
+    None
+}
+
 /// True when the device has a `partition` attribute (it IS a partition).
 pub fn is_partition(sysfs_root: &Path, name: &str) -> bool {
     fs::read_u64_under(sysfs_root, &format!("sys/class/block/{name}/partition")).unwrap_or(0) != 0
@@ -131,6 +177,20 @@ mod tests {
 
     const NVME: &str = "259 0 nvme1n1 330806 40672 29025589 189005 299859 96179 10788918 492436 0 178017 684999 684 0 10468704 1629 2745 1929";
     const OLD_FMT: &str = "8 0 sda 5494 24 202288 10941 0 0 0 0 0 7194 10941";
+
+    #[test]
+    fn root_mount_maps_to_the_physical_disk() {
+        assert_eq!(physical_disk_name("nvme1n1p2"), "nvme1n1");
+        assert_eq!(physical_disk_name("nvme0n1"), "nvme0n1");
+        assert_eq!(physical_disk_name("sda1"), "sda");
+        assert_eq!(physical_disk_name("mmcblk0p2"), "mmcblk0");
+        let mounts = "\
+/dev/nvme1n1p1 /boot ext4 rw 0 0
+/dev/nvme1n1p2 / btrfs rw,relatime 0 0
+";
+        assert_eq!(root_disk_from_mounts(mounts).as_deref(), Some("nvme1n1"));
+        assert_eq!(root_disk_from_mounts("overlay / overlay rw 0 0"), None);
+    }
 
     #[test]
     fn parses_modern_and_old_lines() {
