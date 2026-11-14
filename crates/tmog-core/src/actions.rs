@@ -57,6 +57,7 @@ mod platform {
     pub(super) const SIGSTOP: i32 = 19;
     pub(super) const ESRCH: i32 = 3;
     const ENOSYS: i32 = 38;
+    const EPERM: i32 = 1;
     const POLLIN: i16 = 0x1;
     // Syscalls numbered >= 424 share one table across every Linux arch.
     const SYS_PIDFD_SEND_SIGNAL: i64 = 424;
@@ -89,10 +90,21 @@ mod platform {
         }
     }
 
-    /// Start time (stat field 22) of the live process at `pid`, if any.
-    pub(super) fn read_starttime(pid: i32) -> Option<u64> {
+    pub(super) fn pidfd_unavailable(errno: i32) -> bool {
+        errno == ENOSYS || errno == EPERM
+    }
+
+    /// Start time (stat field 22) and state of the process at `pid`.
+    fn read_stat(pid: i32) -> Option<(u64, char)> {
         let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        crate::process::parse_stat(&text).ok().map(|p| p.starttime)
+        crate::process::parse_stat(&text)
+            .ok()
+            .map(|p| (p.starttime, p.state))
+    }
+
+    /// Start time (stat field 22) of the process at `pid`, if any.
+    pub(super) fn read_starttime(pid: i32) -> Option<u64> {
+        read_stat(pid).map(|(t, _)| t)
     }
 
     impl Pinned {
@@ -100,9 +112,27 @@ mod platform {
         /// The check runs AFTER pinning: once the fd exists it cannot be
         /// re-pointed, so a matching start time proves the fd is ours.
         pub(super) fn new(pid: i32, starttime: u64) -> Result<Pinned, i32> {
+            Self::open(pid, starttime, true)
+        }
+
+        fn open(pid: i32, starttime: u64, try_pidfd: bool) -> Result<Pinned, i32> {
+            if !try_pidfd {
+                let pinned = Pinned {
+                    pid,
+                    starttime,
+                    fd: None,
+                };
+                return match read_starttime(pid) {
+                    Some(s) if s == starttime => Ok(pinned),
+                    _ => Err(ESRCH),
+                };
+            }
             let fd = match unsafe { syscall(SYS_PIDFD_OPEN, pid as i64, 0i64) } {
                 r if r >= 0 => Some(r as i32),
-                _ if last_errno() == ENOSYS => None,
+                // ENOSYS: kernel < 5.3. EPERM: pidfd_open never returns it
+                // itself, so it means a seccomp sandbox blocked the call.
+                // Either way, fall back to start-time checks.
+                _ if pidfd_unavailable(last_errno()) => None,
                 _ => return Err(last_errno()),
             };
             let pinned = Pinned { pid, starttime, fd };
@@ -116,7 +146,11 @@ mod platform {
         pub(super) fn alive(&self) -> bool {
             match self.fd {
                 Some(_) => self.signal(0).ok,
-                None => read_starttime(self.pid) == Some(self.starttime),
+                // a zombie (Z) or dead (X) task has exited; it only keeps
+                // its /proc entry until the parent reaps it
+                None => {
+                    matches!(read_stat(self.pid), Some((t, st)) if t == self.starttime && st != 'Z' && st != 'X')
+                }
             }
         }
 
@@ -170,6 +204,12 @@ mod platform {
 
         pub(super) fn pid(&self) -> i32 {
             self.pid
+        }
+
+        /// Tests: pin without a pidfd, as on old kernels or under seccomp.
+        #[cfg(test)]
+        pub(super) fn new_without_pidfd(pid: i32, starttime: u64) -> Result<Pinned, i32> {
+            Self::open(pid, starttime, false)
         }
     }
 
@@ -739,6 +779,34 @@ mod tests {
         assert!(c.try_wait().unwrap().is_none(), "child must survive");
         assert!(force_kill_ref(real).ok);
         let _ = c.wait();
+    }
+
+    #[test]
+    fn sandboxed_pidfd_falls_back() {
+        // seccomp-blocked (EPERM) and missing (ENOSYS) pidfd_open both use
+        // the start-time fallback; real errors (ESRCH) do not
+        assert!(platform::pidfd_unavailable(38));
+        assert!(platform::pidfd_unavailable(1));
+        assert!(!platform::pidfd_unavailable(platform::ESRCH));
+    }
+
+    #[test]
+    fn fallback_path_signals_and_refuses_reuse() {
+        let mut c = spawn_child(false);
+        let r = child_ref(&c);
+        let pid = r.pid as i32;
+        // wrong start time: refused before any signal
+        assert_eq!(
+            platform::Pinned::new_without_pidfd(pid, r.starttime + 1).err(),
+            Some(platform::ESRCH)
+        );
+        let p = platform::Pinned::new_without_pidfd(pid, r.starttime).unwrap();
+        assert!(p.alive());
+        assert!(p.signal(platform::SIGTERM).ok);
+        assert!(p.wait_exit(Duration::from_secs(2)));
+        let _ = c.wait();
+        // after exit: no signal goes to whatever reuses the pid
+        assert_eq!(p.signal(SIGKILL).errno, platform::ESRCH);
     }
 
     #[test]
