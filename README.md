@@ -143,6 +143,22 @@ cargo build --release
 BINDIR=$PWD/target/release bash packaging/install-desktop.sh
 ```
 
+## Releasing
+
+Pushing a version tag builds the AppImage on GitHub's Ubuntu 22.04 runner
+and publishes it as a release (`.github/workflows/release.yml`):
+
+```sh
+# 1. bump `version` in Cargo.toml (e.g. 0.2.1), merge to main
+# 2. tag that commit and push the tag
+git tag v0.2.1 && git push origin v0.2.1
+```
+
+The workflow refuses a tag that doesn't match `Cargo.toml`, runs the tests,
+packages with the pinned, checksum-verified tools, and checks that the
+AppImage starts before publishing it with its `.sha256`. Update the version
+in the Install section above afterwards.
+
 ## CLI
 
 ```
