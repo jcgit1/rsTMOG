@@ -1,5 +1,4 @@
 /target/
-Cargo.lock
 packaging/appimage/dist/
 *.profraw
 .cargo/

@@ -22,8 +22,9 @@ gtk-0.18 stack. A clean move would mean switching `tray-icon` to its `ksni`
 (D-Bus StatusNotifier) backend and dropping our direct gtk dep — viable, but
 a tray-behavior change worth its own ticket, not a drive-by fix.
 `cargo audit` still reports it; the ignore lives only in `deny.toml`
-(`cargo deny check`). Note: `Cargo.lock` is gitignored for this bin crate,
-so lockfile fixes below are local only.
+(`cargo deny check`). `Cargo.lock` is committed (2026-11-13), so release
+builds use exactly the reviewed dependency versions (`cargo build --locked`
+in `packaging/appimage/inside.sh`).
 
 **Action:** ignored in `deny.toml` with a full rationale. Revisit if we ever
 touch `glib::Variant` APIs, or do the ksni migration.
@@ -39,6 +40,12 @@ The zbus/zvariant/async-std chains come transitively from `dark-light`
 
 ## Yanked: async-executor 1.14.0
 
-Fixed locally: `cargo update -p async-executor` → 1.14.1 (2026-11-05).
-`Cargo.lock` is gitignored, so this lands via rebuilds; CI/build hosts pick
-1.14.1 from the registry automatically.
+Fixed: `cargo update -p async-executor` → 1.14.1 (2026-11-05); the
+committed `Cargo.lock` now pins it.
+
+## Release build tools
+
+linuxdeploy, its GTK plugin, appimagetool and the AppImage runtime are
+pinned to tagged releases and SHA-256 verified before they run
+(`packaging/appimage/tools.sh`); nothing is fetched from a `continuous`
+tag.
