@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxrandr-dev \
         libxkbcommon-dev \
         libwayland-dev \
+        librsvg2-dev \
+        gobject-introspection \
     && rm -rf /var/lib/apt/lists/*
 
 ENV RUSTUP_HOME=/opt/rustup \
@@ -38,7 +40,7 @@ RUN mkdir -p /opt/appimage \
     && curl -fsSL -o /opt/appimage/linuxdeploy \
         https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
     && curl -fsSL -o /opt/appimage/linuxdeploy-plugin-gtk \
-        https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/releases/download/continuous/linuxdeploy-plugin-gtk-x86_64.AppImage \
+        https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/3b67a1d1c1b0c8268f57f2bce40fe2d33d409cea/linuxdeploy-plugin-gtk.sh \
     && curl -fsSL -o /opt/appimage/appimagetool \
         https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
     && chmod +x /opt/appimage/linuxdeploy /opt/appimage/linuxdeploy-plugin-gtk /opt/appimage/appimagetool

@@ -26,8 +26,10 @@ if ! command -v linuxdeploy >/dev/null 2>&1 \
     TOOLDIR=$(mktemp -d)
     curl -fsSL -o "$TOOLDIR/linuxdeploy" \
         https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+    # The GTK plugin no longer publishes an AppImage. This commit is the
+    # script linuxdeploy still expects to find as linuxdeploy-plugin-gtk.
     curl -fsSL -o "$TOOLDIR/linuxdeploy-plugin-gtk" \
-        https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/releases/download/continuous/linuxdeploy-plugin-gtk-x86_64.AppImage
+        https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/3b67a1d1c1b0c8268f57f2bce40fe2d33d409cea/linuxdeploy-plugin-gtk.sh
     curl -fsSL -o "$TOOLDIR/appimagetool" \
         https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
     chmod +x "$TOOLDIR/linuxdeploy" "$TOOLDIR/linuxdeploy-plugin-gtk" "$TOOLDIR/appimagetool"
@@ -103,6 +105,11 @@ if [[ "$winner" != "2.35" ]]; then
     echo "glibc $max_glibc is newer than Ubuntu 22.04 (2.35); build in packaging/appimage" >&2
     exit 1
 fi
+
+# mktemp creates the AppDir as 0700. The runtime refuses that, because the
+# person who runs the AppImage is not the packager.
+chmod -R a+rX "$APPDIR"
+chmod a+rx "$APPDIR/AppRun"
 
 mkdir -p "$OUT"
 DEST="$OUT/rstmog-${VERSION}-x86_64.AppImage"
