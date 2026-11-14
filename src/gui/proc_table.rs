@@ -248,7 +248,12 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
                             .cpu
                             .map(|c| format!("{c:.1}"))
                             .unwrap_or_else(|| "-".into());
-                        let user = r.proc.user.clone().unwrap_or_default();
+                        // unknown name: show the numeric uid, not a blank
+                        let user = match (&r.proc.user, r.proc.uid) {
+                            (Some(u), _) => u.clone(),
+                            (None, Some(uid)) => uid.to_string(),
+                            (None, None) => "-".into(),
+                        };
 
                         // Cells are plain, non-selectable labels; the whole
                         // row is ONE click target (below) so a click or

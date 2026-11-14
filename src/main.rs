@@ -546,7 +546,7 @@ fn main() -> anyhow::Result<()> {
                 let ps = tmog_core::process::list_pids(root);
                 let mut n = 0;
                 for pid in ps {
-                    if tmog_core::process::collect_stat_only(root, pid).is_ok() {
+                    if tmog_core::process::collect_stat_only(root, pid, 4096).is_ok() {
                         n += 1;
                     }
                 }

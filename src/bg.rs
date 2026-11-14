@@ -10,7 +10,7 @@
 
 use crate::sampler::{Sampler, Snapshot};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// Handle to the background sampler. Dropping the last clone stops the
@@ -19,7 +19,10 @@ pub struct SamplerHandle {
     shared: Arc<RwLock<Arc<Snapshot>>>,
     stop: Arc<AtomicBool>,
     refresh_ms: Arc<AtomicU32>,
-    tx_detail: crossbeam_channel::Sender<Vec<u32>>,
+    /// Latest detail request from the UI. The UI asks every frame and the
+    /// sampler wakes once per tick, so only the newest request matters: a
+    /// new one overwrites whatever the sampler has not picked up yet.
+    detail_req: Arc<Mutex<Option<Vec<u32>>>>,
     joiner: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -38,7 +41,8 @@ impl SamplerHandle {
         let shared_t = Arc::clone(&shared);
         let stop_t = Arc::clone(&stop);
         let rate_t = Arc::clone(&rate);
-        let (tx_detail, rx_detail) = crossbeam_channel::unbounded::<Vec<u32>>();
+        let detail_req: Arc<Mutex<Option<Vec<u32>>>> = Arc::new(Mutex::new(None));
+        let detail_req_t = Arc::clone(&detail_req);
         let joiner = std::thread::Builder::new()
             .name("rstmog-sampler".into())
             .spawn(move || {
@@ -47,11 +51,9 @@ impl SamplerHandle {
                 // effective cadence degrades gracefully.
                 while !stop_t.load(Ordering::Relaxed) {
                     let began = Instant::now();
-                    // slow-tier detail requests from the UI thread: the UI
-                    // sends one per frame, so drain them all and keep only
-                    // the newest (taking one per tick let the queue grow
-                    // without bound and enriched rows from minutes ago)
-                    if let Some(pids) = rx_detail.try_iter().last() {
+                    // slow-tier detail requests from the UI thread
+                    let req = detail_req_t.lock().map(|mut g| g.take()).unwrap_or(None);
+                    if let Some(pids) = req {
                         sampler.request_detail(&pids);
                     }
                     sampler.tick();
@@ -73,7 +75,7 @@ impl SamplerHandle {
             shared,
             stop,
             refresh_ms: rate,
-            tx_detail,
+            detail_req,
             joiner: Some(joiner),
         }
     }
@@ -84,9 +86,12 @@ impl SamplerHandle {
     }
 
     /// Ask the sampler thread to fully enrich these pids next tick
-    /// (visible table slice + selection). Non-blocking.
+    /// (visible table slice + selection). Replaces any request the sampler
+    /// has not picked up yet. Non-blocking apart from a short lock.
     pub fn request_detail(&self, pids: &[u32]) {
-        let _ = self.tx_detail.try_send(pids.to_vec());
+        if let Ok(mut g) = self.detail_req.lock() {
+            *g = Some(pids.to_vec());
+        }
     }
 
     /// Shared refresh-rate handle (for the repaint driver to track).
@@ -143,17 +148,16 @@ mod tests {
     }
 
     #[test]
-    fn detail_requests_do_not_pile_up() {
+    fn detail_requests_keep_only_the_newest() {
         let mut h = SamplerHandle::start(2000);
         for i in 0..1000u32 {
             h.request_detail(&[i]);
         }
-        // the sampler's next cycle must consume the whole backlog at once
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !h.tx_detail.is_empty() {
-            assert!(Instant::now() < deadline, "backlog never drained");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        // The sampler takes the slot at most once per cycle, and only the
+        // newest request is ever in it: so it is either still the newest,
+        // or the sampler already took exactly that one.
+        let slot = h.detail_req.lock().unwrap().clone();
+        assert!(slot.is_none() || slot == Some(vec![999]), "got {slot:?}");
         h.shutdown();
     }
 

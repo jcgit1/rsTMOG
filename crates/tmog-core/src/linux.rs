@@ -50,7 +50,7 @@ impl Collector for LinuxCollector {
             uptime_s: crate::loadavg::collect_uptime(root).ok(),
             procs: crate::process::list_pids(root)
                 .into_iter()
-                .filter_map(|pid| crate::process::collect_stat_only(root, pid).ok())
+                .filter_map(|pid| crate::process::collect_stat_only(root, pid, 4096).ok())
                 .collect(),
             disks: crate::diskstats::collect(root).unwrap_or_default(),
             nets: crate::netdev::collect(root).unwrap_or_default(),
