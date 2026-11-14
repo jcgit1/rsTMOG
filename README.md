@@ -43,20 +43,45 @@ packaging/          .desktop entry + installer for KDE/GNOME menus
 docs/               headless-rendered page screenshots
 ```
 
-## Download
+## Install
 
-Linux x86_64 AppImages are on the [release page](https://github.com/jcgit1/rsTMOG/releases). No Rust toolchain is required. Vulkan and the NVIDIA driver stay on your machine; the AppImage bundles GTK 3 for the tray.
-
-```sh
-chmod +x rstmog-*-x86_64.AppImage
-./rstmog-*-x86_64.AppImage
-```
-
-Rebuild it with Docker (Ubuntu 22.04, so the binary still runs on older glibc):
+The Linux x86_64 build is [rstmog 0.2.0](https://github.com/jcgit1/rsTMOG/releases/tag/v0.2.0). No Rust toolchain is required. Vulkan and the NVIDIA driver stay on your machine; GTK 3 for the tray is inside the AppImage. It needs glibc 2.35 and Linux 3.2 or newer (Ubuntu 22.04 and later).
 
 ```sh
-bash packaging/appimage/build.sh
+cd /tmp
+curl -fLO https://github.com/jcgit1/rsTMOG/releases/download/v0.2.0/rstmog-0.2.0-x86_64.AppImage
+curl -fLO https://github.com/jcgit1/rsTMOG/releases/download/v0.2.0/rstmog-0.2.0-x86_64.AppImage.sha256
+sha256sum -c rstmog-0.2.0-x86_64.AppImage.sha256
+
+mkdir -p "$HOME/.local/bin" \
+  "$HOME/.local/share/applications" \
+  "$HOME/.local/share/icons/hicolor/256x256/apps"
+install -m 755 rstmog-0.2.0-x86_64.AppImage "$HOME/.local/bin/rstmog"
+
+tmp=$(mktemp -d)
+( cd "$tmp" && "$HOME/.local/bin/rstmog" --appimage-extract usr/share/icons/hicolor/256x256/apps/rstmog.png )
+install -m 644 "$tmp/squashfs-root/usr/share/icons/hicolor/256x256/apps/rstmog.png" \
+  "$HOME/.local/share/icons/hicolor/256x256/apps/rstmog.png"
+rm -rf "$tmp"
+
+cat > "$HOME/.local/share/applications/rstmog.desktop" << EOF
+[Desktop Entry]
+Type=Application
+Name=rsTMOG
+GenericName=Task Manager
+Comment=Task Manager OG, rewritten in Rust
+Exec=$HOME/.local/bin/rstmog
+Icon=rstmog
+Terminal=false
+Categories=System;Monitor;
+Keywords=task;manager;process;monitor;cpu;memory;
+EOF
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 ```
+
+Open a new terminal and run `rstmog`, or launch rsTMOG from the application menu. If the file reports that FUSE is missing, start it with `APPIMAGE_EXTRACT_AND_RUN=1 rstmog`.
+
+To rebuild the AppImage (Docker, Ubuntu 22.04): `bash packaging/appimage/build.sh`.
 
 ## Building
 
