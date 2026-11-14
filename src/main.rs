@@ -377,6 +377,30 @@ fn snapshot() -> i32 {
     0
 }
 
+/// Create a fresh, owner-only directory under the temp dir. `create_dir`
+/// (not `create_dir_all`) fails if the path already exists, so a directory
+/// or symlink planted by another user is never written into.
+fn private_temp_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
+    let base = std::env::temp_dir();
+    let mut last_err = None;
+    for attempt in 0..16u32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let dir = base.join(format!("{prefix}-{}-{nanos}-{attempt}", std::process::id()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_err = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("no free temp dir name")))
+}
+
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
@@ -400,7 +424,9 @@ fn main() -> anyhow::Result<()> {
             let out = args
                 .next()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/rstmog-capture.png"));
+                // current directory, not a fixed /tmp name another user
+                // could pre-create as a symlink
+                .unwrap_or_else(|| std::path::PathBuf::from("rstmog-capture.png"));
             let mut app = gui::App::new_for_capture(50);
             // The sampler runs on its own thread; wait until enough
             // history samples have accumulated for the graphs to be
@@ -449,14 +475,14 @@ fn main() -> anyhow::Result<()> {
                 ("processes", gui::Page::Processes),
                 ("system", gui::Page::System),
             ];
-            let outdir = std::env::temp_dir().join("rstmog-smoke");
-            std::fs::create_dir_all(&outdir)?;
+            let outdir = private_temp_dir("rstmog-smoke")?;
             for (name, page) in pages {
                 let out = outdir.join(format!("{name}.png"));
                 headless::capture(&mut app, page, &out)
                     .map_err(|e| anyhow::anyhow!("smoke page {name}: {e}"))?;
                 println!("smoke {name}: ok");
             }
+            let _ = std::fs::remove_dir_all(&outdir);
             println!("smoke PASSED ({} pages)", pages.len());
         }
         Some("--bench-tick") => {
