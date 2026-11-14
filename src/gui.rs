@@ -189,7 +189,8 @@ impl App {
         let refresh = self.sampler.refresh_handle();
         std::thread::spawn(move || {
             loop {
-                let ms = refresh.load(std::sync::atomic::Ordering::Relaxed) as u64;
+                // floor guards against a 0 ms busy loop
+                let ms = (refresh.load(std::sync::atomic::Ordering::Relaxed) as u64).max(50);
                 // sleep in small steps so a cadence change takes effect quickly
                 let step = std::time::Duration::from_millis(ms.min(100));
                 let mut waited = 0u64;
