@@ -42,7 +42,14 @@ pub fn capture(app: &mut App, page: crate::gui::Page, out: &std::path::Path) -> 
     for (id, delta) in full_output.textures_delta.set.iter() {
         let egui::epaint::ImageData::Color(ci) = &delta.image;
         let rgba: Vec<u8> = ci.pixels.iter().flat_map(|c| c.to_array()).collect();
-        textures.insert(id.index(), (ci.width(), ci.height(), rgba));
+        apply_delta(
+            &mut textures,
+            id.index(),
+            delta.pos,
+            ci.width(),
+            ci.height(),
+            rgba,
+        );
     }
     if !textures.contains_key(&0) {
         return Err(anyhow::anyhow!(
@@ -53,6 +60,35 @@ pub fn capture(app: &mut App, page: crate::gui::Page, out: &std::path::Path) -> 
     let fb = render_clipped(w, h, &clipped, &textures);
     write_png(out, w, h, &fb)?;
     Ok(())
+}
+
+type Atlas = (usize, usize, Vec<u8>);
+
+/// Apply one texture delta. A delta with `pos` is a partial update (egui
+/// adds glyphs mid-frame) and is patched into the existing image at that
+/// offset; treating it as a whole new image replaced the atlas with a
+/// small patch and garbled the text.
+fn apply_delta(
+    textures: &mut std::collections::HashMap<u64, Atlas>,
+    id: u64,
+    pos: Option<[usize; 2]>,
+    pw: usize,
+    ph: usize,
+    rgba: Vec<u8>,
+) {
+    match (pos, textures.get_mut(&id)) {
+        (Some([x0, y0]), Some((tw, th, atlas))) => {
+            let n = pw.min(tw.saturating_sub(x0)) * 4;
+            for y in 0..ph.min(th.saturating_sub(y0)) {
+                let dst = ((y0 + y) * *tw + x0) * 4;
+                let src = y * pw * 4;
+                atlas[dst..dst + n].copy_from_slice(&rgba[src..src + n]);
+            }
+        }
+        _ => {
+            textures.insert(id, (pw, ph, rgba));
+        }
+    }
 }
 
 trait IdIndex {
@@ -265,6 +301,20 @@ fn crc32(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_texture_delta_patches_in_place() {
+        let mut t = std::collections::HashMap::new();
+        apply_delta(&mut t, 0, None, 4, 4, vec![0; 4 * 4 * 4]);
+        // 2x1 patch of 0xFF at (1, 2), plus one clipped pixel past the edge
+        apply_delta(&mut t, 0, Some([3, 2]), 2, 1, vec![0xFF; 2 * 4]);
+        let (w, h, px) = &t[&0];
+        assert_eq!((*w, *h), (4, 4), "atlas keeps its size");
+        let at = |x: usize, y: usize| px[(y * 4 + x) * 4];
+        assert_eq!(at(3, 2), 0xFF);
+        assert_eq!(at(2, 2), 0);
+        assert_eq!(at(0, 3), 0, "clipped column must not wrap to next row");
+    }
 
     #[test]
     fn crc32_matches_reference() {
