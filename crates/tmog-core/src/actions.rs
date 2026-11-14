@@ -45,6 +45,9 @@ mod platform {
         pub(super) fn getpriority(which: i32, who: u32) -> i32;
         pub(super) fn setpriority(which: i32, who: u32, prio: i32) -> i32;
         pub(super) fn __errno_location() -> *mut i32;
+        fn syscall(num: i64, ...) -> i64;
+        fn poll(fds: *mut PollFd, nfds: u64, timeout_ms: i32) -> i32;
+        fn close(fd: i32) -> i32;
     }
 
     pub(super) const PRIO_PROCESS: i32 = 0;
@@ -52,6 +55,123 @@ mod platform {
     pub(super) const SIGTERM: i32 = 15;
     pub(super) const SIGCONT: i32 = 18;
     pub(super) const SIGSTOP: i32 = 19;
+    pub(super) const ESRCH: i32 = 3;
+    const ENOSYS: i32 = 38;
+    const POLLIN: i16 = 0x1;
+    // Syscalls numbered >= 424 share one table across every Linux arch.
+    const SYS_PIDFD_SEND_SIGNAL: i64 = 424;
+    const SYS_PIDFD_OPEN: i64 = 434;
+
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+
+    /// A process pinned by identity (pid + start time), so a recycled pid
+    /// can never receive the action. With a pidfd (Linux >= 5.3) signals go
+    /// through the fd, which always refers to the original process; on
+    /// older kernels we fall back to start-time checks around `kill`.
+    pub(super) struct Pinned {
+        pid: i32,
+        starttime: u64,
+        fd: Option<i32>,
+    }
+
+    impl Drop for Pinned {
+        fn drop(&mut self) {
+            if let Some(fd) = self.fd {
+                unsafe {
+                    close(fd);
+                }
+            }
+        }
+    }
+
+    /// Start time (stat field 22) of the live process at `pid`, if any.
+    pub(super) fn read_starttime(pid: i32) -> Option<u64> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        crate::process::parse_stat(&text).ok().map(|p| p.starttime)
+    }
+
+    impl Pinned {
+        /// Pin `pid`, then confirm it is still the process the user picked.
+        /// The check runs AFTER pinning: once the fd exists it cannot be
+        /// re-pointed, so a matching start time proves the fd is ours.
+        pub(super) fn new(pid: i32, starttime: u64) -> Result<Pinned, i32> {
+            let fd = match unsafe { syscall(SYS_PIDFD_OPEN, pid as i64, 0i64) } {
+                r if r >= 0 => Some(r as i32),
+                _ if last_errno() == ENOSYS => None,
+                _ => return Err(last_errno()),
+            };
+            let pinned = Pinned { pid, starttime, fd };
+            if read_starttime(pid) != Some(starttime) {
+                return Err(ESRCH); // exited, or pid now belongs to another process
+            }
+            Ok(pinned)
+        }
+
+        /// Is the pinned process still alive (and so still owns its pid)?
+        pub(super) fn alive(&self) -> bool {
+            match self.fd {
+                Some(_) => self.signal(0).ok,
+                None => read_starttime(self.pid) == Some(self.starttime),
+            }
+        }
+
+        pub(super) fn signal(&self, sig: i32) -> ActionResult {
+            let r = match self.fd {
+                Some(fd) => unsafe {
+                    syscall(
+                        SYS_PIDFD_SEND_SIGNAL,
+                        fd as i64,
+                        sig as i64,
+                        std::ptr::null::<u8>() as i64,
+                        0i64,
+                    )
+                },
+                None => {
+                    // No pidfd: re-check identity right before signalling.
+                    if read_starttime(self.pid) != Some(self.starttime) {
+                        return ActionResult::err(ESRCH);
+                    }
+                    unsafe { kill(self.pid, sig) as i64 }
+                }
+            };
+            if r == 0 {
+                ActionResult::ok()
+            } else {
+                ActionResult::err(last_errno())
+            }
+        }
+
+        /// Wait up to `d` for the process to exit. True if it exited.
+        pub(super) fn wait_exit(&self, d: Duration) -> bool {
+            if let Some(fd) = self.fd {
+                // A pidfd turns readable when the process exits.
+                let mut p = PollFd {
+                    fd,
+                    events: POLLIN,
+                    revents: 0,
+                };
+                let ms = d.as_millis().min(i32::MAX as u128) as i32;
+                return unsafe { poll(&mut p, 1, ms) } > 0;
+            }
+            let deadline = Instant::now() + d;
+            while Instant::now() < deadline {
+                if !self.alive() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            !self.alive()
+        }
+
+        pub(super) fn pid(&self) -> i32 {
+            self.pid
+        }
+    }
 
     pub(super) fn last_errno() -> i32 {
         unsafe { *__errno_location() }
@@ -294,6 +414,109 @@ pub fn send_signal(pid: i32, sig: i32) -> ActionResult {
     }
 }
 
+/// A process as the user saw it: pid plus its start time (stat field 22).
+/// The `*_ref` entry points refuse to act if the pid now belongs to a
+/// different process (pid reuse), which is what the GUI must use: its
+/// rows can be seconds old by the time a menu item is clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcRef {
+    pub pid: u32,
+    pub starttime: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn pin(r: ProcRef) -> Result<platform::Pinned, ActionResult> {
+    if r.pid == 0 || r.pid > i32::MAX as u32 {
+        return Err(ActionResult::err(22)); // EINVAL
+    }
+    platform::Pinned::new(r.pid as i32, r.starttime).map_err(ActionResult::err)
+}
+
+/// `end_task`, but only for the exact process in `r`. SIGTERM, wait up to
+/// `grace`, then SIGKILL — both delivered to the pinned process, never to
+/// whatever owns the pid number afterwards. Blocking; call off the UI thread.
+#[cfg(target_os = "linux")]
+pub fn end_task_ref(r: ProcRef, grace: Duration) -> ActionResult {
+    let p = match pin(r) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let t = p.signal(platform::SIGTERM);
+    if !t.ok {
+        return t;
+    }
+    if p.wait_exit(grace) {
+        return ActionResult::ok();
+    }
+    match p.signal(SIGKILL) {
+        // exited between the wait and the kill: that's success
+        res if !res.ok && res.errno == platform::ESRCH => ActionResult::ok(),
+        res => res,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn signal_ref(r: ProcRef, sig: i32) -> ActionResult {
+    match pin(r) {
+        Ok(p) => p.signal(sig),
+        Err(e) => e,
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn force_kill_ref(r: ProcRef) -> ActionResult {
+    signal_ref(r, SIGKILL)
+}
+
+#[cfg(target_os = "linux")]
+pub fn suspend_ref(r: ProcRef) -> ActionResult {
+    signal_ref(r, SIGSTOP)
+}
+
+#[cfg(target_os = "linux")]
+pub fn resume_ref(r: ProcRef) -> ActionResult {
+    signal_ref(r, SIGCONT)
+}
+
+/// `set_nice` for the exact process in `r`. There is no pidfd form of
+/// setpriority, so we pin, renice by pid, then confirm the pinned process
+/// is still alive: if it is, it still owned the pid during the call.
+#[cfg(target_os = "linux")]
+pub fn set_nice_ref(r: ProcRef, nice: i32) -> ActionResult {
+    let p = match pin(r) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let res = set_nice(p.pid(), nice);
+    if res.ok && !p.alive() {
+        return ActionResult::err(platform::ESRCH);
+    }
+    res
+}
+
+/// Windows: handles are opened per call; pid reuse there needs the same
+/// treatment (compare creation time) before this ships on Windows.
+#[cfg(target_os = "windows")]
+pub fn end_task_ref(r: ProcRef, grace: Duration) -> ActionResult {
+    end_task(r.pid as i32, grace)
+}
+#[cfg(target_os = "windows")]
+pub fn force_kill_ref(r: ProcRef) -> ActionResult {
+    force_kill(r.pid as i32)
+}
+#[cfg(target_os = "windows")]
+pub fn suspend_ref(r: ProcRef) -> ActionResult {
+    suspend(r.pid as i32)
+}
+#[cfg(target_os = "windows")]
+pub fn resume_ref(r: ProcRef) -> ActionResult {
+    resume(r.pid as i32)
+}
+#[cfg(target_os = "windows")]
+pub fn set_nice_ref(r: ProcRef, nice: i32) -> ActionResult {
+    set_nice(r.pid as i32, nice)
+}
+
 /// Graceful-then-forced termination. Blocking; call off the UI thread.
 pub fn end_task(pid: i32, grace: Duration) -> ActionResult {
     if pid <= 0 {
@@ -484,6 +707,74 @@ mod tests {
             assert!(n == 5 || n == -5, "nice should read back as set: {n}");
         }
         let _ = force_kill(pid);
+        let _ = c.wait();
+    }
+
+    fn child_ref(c: &std::process::Child) -> ProcRef {
+        let pid = c.id();
+        ProcRef {
+            pid,
+            starttime: platform::read_starttime(pid as i32).expect("child stat"),
+        }
+    }
+
+    #[test]
+    fn ref_actions_refuse_a_recycled_pid() {
+        // Same pid, different start time = a different process now owns
+        // the number. Every action must refuse with ESRCH and leave the
+        // live process untouched.
+        let mut c = spawn_child(false);
+        let real = child_ref(&c);
+        let stale = ProcRef {
+            starttime: real.starttime.wrapping_sub(1),
+            ..real
+        };
+        assert_eq!(force_kill_ref(stale).errno, platform::ESRCH);
+        assert_eq!(suspend_ref(stale).errno, platform::ESRCH);
+        assert_eq!(set_nice_ref(stale, 5).errno, platform::ESRCH);
+        assert_eq!(
+            end_task_ref(stale, Duration::from_millis(50)).errno,
+            platform::ESRCH
+        );
+        assert!(c.try_wait().unwrap().is_none(), "child must survive");
+        assert!(force_kill_ref(real).ok);
+        let _ = c.wait();
+    }
+
+    #[test]
+    fn ref_actions_reject_invalid_pids() {
+        let bad = ProcRef {
+            pid: 0,
+            starttime: 0,
+        };
+        assert_eq!(force_kill_ref(bad).errno, 22);
+        let huge = ProcRef {
+            pid: u32::MAX, // would be -1 (broadcast) as i32
+            starttime: 0,
+        };
+        assert_eq!(force_kill_ref(huge).errno, 22);
+    }
+
+    #[test]
+    fn end_task_ref_terminates_and_escalates() {
+        let mut c = spawn_child(false);
+        assert!(end_task_ref(child_ref(&c), Duration::from_secs(2)).ok);
+        assert!(!c.wait().unwrap().success());
+
+        let mut c = spawn_child(true); // ignores SIGTERM
+        // give the shell a moment to install the trap before we signal
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(end_task_ref(child_ref(&c), Duration::from_millis(300)).ok);
+        assert!(!c.wait().unwrap().success());
+    }
+
+    #[test]
+    fn set_nice_ref_lowers_priority() {
+        let mut c = spawn_child(false);
+        let r = child_ref(&c);
+        assert!(set_nice_ref(r, 7).ok);
+        assert_eq!(get_nice(r.pid as i32), Ok(7));
+        let _ = force_kill_ref(r);
         let _ = c.wait();
     }
 

@@ -441,14 +441,14 @@ impl App {
         use std::time::Duration;
         use tmog_core::actions;
         // fast, non-blocking actions can complete inline
+        // fast, non-blocking actions complete inline. Every kernel-facing
+        // call goes through the *_ref API, which refuses a recycled pid.
         let inline = match &a {
             proc_table::ProcAction::EndTask(_) => None,
-            proc_table::ProcAction::ForceKill(pid) => Some(actions::force_kill(*pid as i32)),
-            proc_table::ProcAction::Suspend(pid) => Some(actions::suspend(*pid as i32)),
-            proc_table::ProcAction::Resume(pid) => Some(actions::resume(*pid as i32)),
-            proc_table::ProcAction::SetNice(pid, nice) => {
-                Some(actions::set_nice(*pid as i32, *nice))
-            }
+            proc_table::ProcAction::ForceKill(t) => Some(actions::force_kill_ref(*t)),
+            proc_table::ProcAction::Suspend(t) => Some(actions::suspend_ref(*t)),
+            proc_table::ProcAction::Resume(t) => Some(actions::resume_ref(*t)),
+            proc_table::ProcAction::SetNice(t, nice) => Some(actions::set_nice_ref(*t, *nice)),
             proc_table::ProcAction::CopyCmdline(cmd) => {
                 self.clipboard_text = Some(cmd.clone());
                 return;
@@ -459,16 +459,16 @@ impl App {
             return;
         }
         // EndTask: SIGTERM→grace→SIGKILL off the UI thread.
-        if let proc_table::ProcAction::EndTask(pid) = a {
+        if let proc_table::ProcAction::EndTask(t) = a {
             let tx = self.action_tx.clone();
             let _ = std::thread::Builder::new()
                 .name("rstmog-endtask".into())
                 .spawn(move || {
-                    let res = actions::end_task(pid as i32, Duration::from_secs(3));
+                    let res = actions::end_task_ref(t, Duration::from_secs(3));
                     // a closed receiver just means the app quit mid-kill
-                    let _ = tx.send((proc_table::ProcAction::EndTask(pid), res.ok, res.errno));
+                    let _ = tx.send((proc_table::ProcAction::EndTask(t), res.ok, res.errno));
                 });
-            self.toast = Some((format!("ending task {pid}…"), Self::toast_deadline()));
+            self.toast = Some((format!("ending task {}…", t.pid), Self::toast_deadline()));
         }
     }
 
@@ -487,15 +487,18 @@ impl App {
     /// Turn an action outcome into a footer toast (success or errno).
     fn report_action(&mut self, a: &proc_table::ProcAction, ok: bool, errno: i32) {
         let what = match a {
-            proc_table::ProcAction::EndTask(p) => format!("end task {p}"),
-            proc_table::ProcAction::ForceKill(p) => format!("force kill {p}"),
-            proc_table::ProcAction::Suspend(p) => format!("suspend {p}"),
-            proc_table::ProcAction::Resume(p) => format!("resume {p}"),
-            proc_table::ProcAction::SetNice(p, n) => format!("set priority {p}→{n}"),
+            proc_table::ProcAction::EndTask(t) => format!("end task {}", t.pid),
+            proc_table::ProcAction::ForceKill(t) => format!("force kill {}", t.pid),
+            proc_table::ProcAction::Suspend(t) => format!("suspend {}", t.pid),
+            proc_table::ProcAction::Resume(t) => format!("resume {}", t.pid),
+            proc_table::ProcAction::SetNice(t, n) => format!("set priority {}→{n}", t.pid),
             proc_table::ProcAction::CopyCmdline(_) => return,
         };
         let msg = if ok {
             format!("{what} ok")
+        } else if errno == 3 {
+            // ESRCH: gone, or the pid now belongs to a different process
+            format!("{what} failed: process has exited")
         } else {
             format!("{what} failed: errno {errno}")
         };
@@ -601,4 +604,147 @@ pub fn run() -> anyhow::Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+
+    type Texts = Vec<(String, egui::Rect)>;
+
+    /// Run one frame of the Processes page; return every text run painted.
+    fn frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> Texts {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 700.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let out = ctx.run(raw, |ctx| render_page(ctx, app, Page::Processes));
+        fn walk(s: &egui::epaint::Shape, out: &mut Texts) {
+            match s {
+                egui::epaint::Shape::Text(t) => {
+                    out.push((t.galley.text().to_string(), t.visual_bounding_rect()))
+                }
+                egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for c in &out.shapes {
+            walk(&c.shape, &mut texts);
+        }
+        texts
+    }
+
+    /// Move, press, release over three frames (egui hit-tests against the
+    /// previous frame's layout). Returns the release frame's text.
+    fn click(ctx: &egui::Context, app: &mut App, pos: egui::Pos2, b: egui::PointerButton) -> Texts {
+        let m = egui::Modifiers::default();
+        frame(ctx, app, vec![egui::Event::PointerMoved(pos)]);
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: b,
+            pressed,
+            modifiers: m,
+        };
+        frame(ctx, app, vec![press(true)]);
+        frame(ctx, app, vec![press(false)])
+    }
+
+    fn find<'a>(texts: &'a Texts, label: &str) -> Option<&'a egui::Rect> {
+        texts.iter().find(|(t, _)| t == label).map(|(_, r)| r)
+    }
+
+    /// App on the Processes page plus the screen rect of one row's pid
+    /// cell (pid 1 sorts stably; any body row works).
+    fn setup() -> (egui::Context, App, u32, egui::Rect) {
+        let mut app = App::new_for_capture(50);
+        app.pull_snapshot();
+        let ctx = egui::Context::default();
+        let texts = frame(&ctx, &mut app, vec![]);
+        let (t, r) = texts
+            .iter()
+            .find(|(t, r)| r.min.y > 60.0 && t.trim().parse::<u32>().is_ok())
+            .expect("a body row pid cell");
+        (ctx, app, t.trim().parse().unwrap(), *r)
+    }
+
+    #[test]
+    fn any_cell_selects_the_row() {
+        // previously only the right-most (user) column took clicks
+        let (ctx, mut app, pid, cell) = setup();
+        click(&ctx, &mut app, cell.center(), egui::PointerButton::Primary);
+        assert_eq!(app.proc_state.selected, Some(pid));
+    }
+
+    #[test]
+    fn context_menu_stays_open_and_acts_on_that_process() {
+        let (ctx, mut app, pid, cell) = setup();
+        click(
+            &ctx,
+            &mut app,
+            cell.center(),
+            egui::PointerButton::Secondary,
+        );
+        // previously the menu existed only on the click frame and was
+        // never visible; it must persist until something is chosen
+        let mut texts = frame(&ctx, &mut app, vec![]);
+        for _ in 0..3 {
+            texts = frame(&ctx, &mut app, vec![]);
+        }
+        let end = *find(&texts, "End task").expect("menu still open");
+        click(&ctx, &mut app, end.center(), egui::PointerButton::Primary);
+        let want = tmog_core::actions::ProcRef {
+            pid,
+            starttime: app
+                .snap
+                .procs
+                .iter()
+                .find(|r| r.proc.pid == pid)
+                .unwrap()
+                .proc
+                .starttime,
+        };
+        assert_eq!(
+            app.proc_state.pending_action,
+            Some(proc_table::ProcAction::EndTask(want))
+        );
+    }
+
+    #[test]
+    fn force_kill_needs_a_second_click() {
+        let (ctx, mut app, _pid, cell) = setup();
+        click(
+            &ctx,
+            &mut app,
+            cell.center(),
+            egui::PointerButton::Secondary,
+        );
+        let texts = frame(&ctx, &mut app, vec![]);
+        let fk = *find(&texts, "Force kill").expect("menu open");
+        let texts = click(&ctx, &mut app, fk.center(), egui::PointerButton::Primary);
+        assert_eq!(
+            app.proc_state.pending_action, None,
+            "one click must not kill"
+        );
+        let texts = if find(&texts, "Click again to force kill").is_some() {
+            texts
+        } else {
+            frame(&ctx, &mut app, vec![])
+        };
+        let confirm = *find(&texts, "Click again to force kill").expect("confirm label");
+        click(
+            &ctx,
+            &mut app,
+            confirm.center(),
+            egui::PointerButton::Primary,
+        );
+        assert!(matches!(
+            app.proc_state.pending_action,
+            Some(proc_table::ProcAction::ForceKill(_))
+        ));
+    }
 }

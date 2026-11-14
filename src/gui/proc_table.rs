@@ -5,17 +5,19 @@
 
 use crate::sampler::Snapshot;
 use eframe::egui;
+use tmog_core::actions::ProcRef;
 use tmog_core::process_table::{self, Row, SortDir, SortKey, TreeRow};
 
 /// What the context menu can do to a row (the GUI never calls the kernel
 /// directly — it emits intents that `App` executes via core::actions).
+/// Targets carry the process start time so a recycled pid is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcAction {
-    EndTask(u32),
-    ForceKill(u32),
-    Suspend(u32),
-    Resume(u32),
-    SetNice(u32, i32),
+    EndTask(ProcRef),
+    ForceKill(ProcRef),
+    Suspend(ProcRef),
+    Resume(ProcRef),
+    SetNice(ProcRef, i32),
     CopyCmdline(String),
 }
 
@@ -30,6 +32,9 @@ pub struct ProcTableState {
     pub selected: Option<u32>,
     /// last action requested by the context menu, drained by App
     pub pending_action: Option<ProcAction>,
+    /// "Force kill" was clicked once for this process; the next click
+    /// confirms (no single-click SIGKILL)
+    pub confirm_kill: Option<ProcRef>,
 }
 
 impl ProcTableState {
@@ -165,7 +170,6 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
     // ---- table: header + body in ONE grid so columns share widths,
     // with row/column borders drawn on the grid's background layer ----
     let mut click: Option<SortKey> = None;
-    let mut menu_pid: Option<u32> = None;
     // row clicked this frame (applied after the grid so the highlight and
     // the re-sorted rows appear on the same frame)
     let mut clicked_pid: Option<u32> = None;
@@ -184,6 +188,9 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
         .id_salt("proc_body")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Reserve a shape slot BEFORE the grid so the selection fill,
+            // known only after layout, is painted underneath the row text.
+            let sel_slot = ui.painter().add(egui::Shape::Noop);
             egui::Grid::new("proc_grid")
                 .num_columns(5)
                 .spacing([0.0, 0.0])
@@ -243,51 +250,36 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
                             .unwrap_or_else(|| "-".into());
                         let user = r.proc.user.clone().unwrap_or_default();
 
-                        ui.horizontal(|ui| {
-                            ui.add_space(CELL_PAD.x);
-                            ui.label(
-                                egui::RichText::new(pads_left(pid.to_string(), PID_W))
-                                    .monospace()
-                                    .color(row_color(r.proc.state)),
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(CELL_PAD.x);
-                            ui.label(
-                                egui::RichText::new(pads(format!("{indent}{name}"), NAME_W))
-                                    .monospace()
-                                    .color(row_color(r.proc.state)),
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(CELL_PAD.x);
-                            ui.label(
-                                egui::RichText::new(pads_left(cpu, CPU_W))
-                                    .monospace()
-                                    .color(row_color(r.proc.state)),
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(CELL_PAD.x);
-                            ui.label(
-                                egui::RichText::new(pads_left(mem_h(r.proc.rss_bytes), MEM_W))
-                                    .monospace()
-                                    .color(row_color(r.proc.state)),
-                            );
-                        });
-                        let resp = ui.horizontal(|ui| {
-                            ui.add_space(CELL_PAD.x);
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(pads(user, USER_W))
-                                        .monospace()
-                                        .color(row_color(r.proc.state)),
-                                )
-                                .sense(egui::Sense::click()),
-                            )
-                        });
-                        let resp = resp.inner;
-                        let row_rect = ui.min_rect();
+                        // Cells are plain, non-selectable labels; the whole
+                        // row is ONE click target (below) so a click or
+                        // right-click anywhere on it selects / opens the menu.
+                        let color = row_color(r.proc.state);
+                        let cell = |ui: &mut egui::Ui, text: String| {
+                            ui.horizontal(|ui| {
+                                ui.add_space(CELL_PAD.x);
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(text).monospace().color(color),
+                                    )
+                                    .selectable(false),
+                                );
+                            })
+                            .response
+                            .rect
+                        };
+                        let first = cell(ui, pads_left(pid.to_string(), PID_W));
+                        cell(ui, pads(format!("{indent}{name}"), NAME_W));
+                        cell(ui, pads_left(cpu, CPU_W));
+                        cell(ui, pads_left(mem_h(r.proc.rss_bytes), MEM_W));
+                        let last = cell(ui, pads(user, USER_W));
+                        let row_rect = first.union(last);
+                        // id keyed by process identity, not layout position,
+                        // so an open menu survives the table re-sorting
+                        let resp = ui.interact(
+                            row_rect,
+                            egui::Id::new(("proc-row", pid, r.proc.starttime)),
+                            egui::Sense::click(),
+                        );
                         if st.selected == Some(pid) {
                             sel_row = Some(rows_rects.len());
                         }
@@ -297,8 +289,14 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
                             clicked_pid = Some(pid);
                         } else if resp.secondary_clicked() {
                             clicked_pid = Some(pid);
-                            menu_pid = Some(pid);
+                            st.confirm_kill = None; // fresh menu, fresh confirm
                         }
+                        // close on outside clicks only: items close the menu
+                        // themselves, and "Force kill" must stay open for its
+                        // confirm click
+                        egui::Popup::context_menu(&resp)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| row_menu(ui, r, st));
                         // follow mode: keep the selected row centered as the
                         // list re-sorts under us (egui scrolls it into view)
                         if st.follow && st.selected == Some(pid) {
@@ -308,12 +306,14 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
                     }
                 });
 
-            // Row/column borders + selection fill, painted on the scroll
-            // content's background layer so they sit under the text and
-            // scroll with the rows.
+            // Selection fill goes into the reserved slot (under the text);
+            // row borders are thin strokes and can sit on top.
             let painter = ui.painter();
             if let Some(i) = sel_row {
-                painter.rect_filled(rows_rects[i], 0.0, sel_bg);
+                painter.set(
+                    sel_slot,
+                    egui::epaint::RectShape::filled(rows_rects[i], 0.0, sel_bg),
+                );
             }
             for rect in &rows_rects {
                 painter.rect_stroke(*rect, 0.0, border_stroke, egui::StrokeKind::Inside);
@@ -332,55 +332,6 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
         } else {
             st.sort = k;
         }
-    }
-
-    // context menu for the requested row
-    if let Some(pid) = menu_pid {
-        let r = s.procs.iter().find(|r| r.proc.pid == pid);
-        let state = r.map(|r| r.proc.state).unwrap_or('?');
-        let cmdline = r.map(|r| r.proc.cmdline.join(" ")).unwrap_or_default();
-        egui::Window::new("proc_menu")
-            .id(egui::Id::new(("procmenu", pid)))
-            .collapsible(false)
-            .title_bar(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ui.ctx(), |ui| {
-                if ui.button("End task").clicked() {
-                    st.pending_action = Some(ProcAction::EndTask(pid));
-                    ui.close();
-                }
-                if ui.button("Force kill").clicked() {
-                    st.pending_action = Some(ProcAction::ForceKill(pid));
-                    ui.close();
-                }
-                ui.separator();
-                if state == 'T' {
-                    if ui.button("Resume").clicked() {
-                        st.pending_action = Some(ProcAction::Resume(pid));
-                        ui.close();
-                    }
-                } else if ui.button("Suspend").clicked() {
-                    st.pending_action = Some(ProcAction::Suspend(pid));
-                    ui.close();
-                }
-                ui.separator();
-                ui.label("priority:");
-                for (label, nice) in [("High", -10), ("Normal", 0), ("Low", 10), ("Idle", 19)] {
-                    if ui.button(label).clicked() {
-                        st.pending_action = Some(ProcAction::SetNice(pid, nice));
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                let can_copy = !cmdline.is_empty();
-                if ui
-                    .add_enabled(can_copy, egui::Button::new("Copy command line"))
-                    .clicked()
-                {
-                    st.pending_action = Some(ProcAction::CopyCmdline(cmdline.clone()));
-                    ui.close();
-                }
-            });
     }
 }
 
@@ -413,5 +364,62 @@ fn row_color(state: char) -> egui::Color32 {
         'Z' | 'X' => egui::Color32::from_rgb(220, 90, 90),
         'T' => egui::Color32::from_rgb(230, 176, 90),
         _ => egui::Color32::from_rgb(200, 200, 200),
+    }
+}
+
+/// Right-click menu for one row. Rendered by egui's popup machinery, so it
+/// stays open across frames until an item is chosen or the user clicks away.
+fn row_menu(ui: &mut egui::Ui, r: &Row, st: &mut ProcTableState) {
+    let target = ProcRef {
+        pid: r.proc.pid,
+        starttime: r.proc.starttime,
+    };
+    ui.label(egui::RichText::new(format!("{} ({})", r.proc.display_name(), target.pid)).strong());
+    ui.separator();
+    if ui.button("End task").clicked() {
+        st.pending_action = Some(ProcAction::EndTask(target));
+        ui.close();
+    }
+    let confirming = st.confirm_kill == Some(target);
+    let kill_label = if confirming {
+        egui::RichText::new("Click again to force kill").color(egui::Color32::from_rgb(235, 90, 90))
+    } else {
+        egui::RichText::new("Force kill")
+    };
+    if ui.button(kill_label).clicked() {
+        if confirming {
+            st.pending_action = Some(ProcAction::ForceKill(target));
+            st.confirm_kill = None;
+            ui.close();
+        } else {
+            st.confirm_kill = Some(target);
+        }
+    }
+    ui.separator();
+    if r.proc.state == 'T' {
+        if ui.button("Resume").clicked() {
+            st.pending_action = Some(ProcAction::Resume(target));
+            ui.close();
+        }
+    } else if ui.button("Suspend").clicked() {
+        st.pending_action = Some(ProcAction::Suspend(target));
+        ui.close();
+    }
+    ui.separator();
+    ui.label("priority:");
+    for (label, nice) in [("High", -10), ("Normal", 0), ("Low", 10), ("Idle", 19)] {
+        if ui.button(label).clicked() {
+            st.pending_action = Some(ProcAction::SetNice(target, nice));
+            ui.close();
+        }
+    }
+    ui.separator();
+    let cmdline = r.proc.cmdline.join(" ");
+    if ui
+        .add_enabled(!cmdline.is_empty(), egui::Button::new("Copy command line"))
+        .clicked()
+    {
+        st.pending_action = Some(ProcAction::CopyCmdline(cmdline));
+        ui.close();
     }
 }
