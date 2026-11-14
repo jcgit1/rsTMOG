@@ -129,6 +129,14 @@ rstmog --smoke             render every page headless; non-zero on failure
 rstmog --version
 ```
 
+## Credits
+
+TMOG (Task Manager OG) was created by David W. Plummer, known as Dave
+Plummer. rsTMOG is an independent, from-scratch Rust reimplementation of his
+original concept and includes none of his code or assets. For the original
+TMOG on Linux, see [tmog.org](https://www.tmog.org/rtm/linux.html). Follow
+Dave Plummer on [X](https://x.com/davepl1968).
+
 ## License
 
 MIT — see [LICENSE](LICENSE). "Task Manager OG"/TMOG is Dave Plummer's
