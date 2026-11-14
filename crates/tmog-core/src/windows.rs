@@ -416,6 +416,14 @@ unsafe fn read_cmdline(_h: HANDLE) -> Vec<String> {
     Vec::new() // PEB offsets above are x64; aarch64 rows show image name only
 }
 
+/// Zeroed buffer of at least `bytes` bytes with 8-byte alignment. Win32
+/// "variable-size struct" APIs write structs (with pointers and u64s) into
+/// the caller's buffer, so reading them back from a `Vec<u8>` (alignment 1)
+/// is undefined behaviour.
+fn aligned_buf(bytes: usize) -> Vec<u64> {
+    vec![0u64; bytes.div_ceil(8)]
+}
+
 /// Owner name for a pid as "DOMAIN\\user" (local accounts: bare name).
 /// None when the process or its token cannot be opened — the row renders
 /// with a blank user column.
@@ -435,7 +443,7 @@ fn process_owner(pid: u32) -> Option<String> {
             let _ = CloseHandle(token);
             return None;
         }
-        let mut buf = vec![0u8; len as usize];
+        let mut buf = aligned_buf(len as usize);
         let ok = GetTokenInformation(
             token,
             TokenUser,
@@ -696,24 +704,32 @@ fn topology() -> (usize, usize) {
         if len == 0 {
             return (0, 0);
         }
-        let mut buf = vec![0u8; len as usize];
+        let mut buf = aligned_buf(len as usize);
         if GetLogicalProcessorInformationEx(RelationAll, Some(buf.as_mut_ptr() as *mut _), &mut len)
             .is_err()
         {
             return (0, 0);
         }
         let (mut cores, mut packages) = (0usize, 0usize);
-        let mut ptr = buf.as_ptr();
-        let end = buf.as_ptr().add(len as usize);
-        while ptr < end {
-            let rel = &*(ptr as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX);
+        let mut ptr = buf.as_ptr() as *const u8;
+        let end = ptr.add((len as usize).min(buf.len() * 8));
+        let hdr = std::mem::size_of::<u32>() * 2; // Relationship + Size
+        while (end as usize - ptr as usize) >= hdr {
+            // entries are variable-size and only 4-byte aligned in practice:
+            // read the two header fields unaligned
+            let relationship =
+                std::ptr::read_unaligned(ptr as *const LOGICAL_PROCESSOR_RELATIONSHIP);
+            let size = std::ptr::read_unaligned((ptr as *const u32).add(1)) as usize;
+            if size < hdr || size > end as usize - ptr as usize {
+                break; // malformed entry: stop instead of looping or overrunning
+            }
             // free constants (not associated consts) in the windows crate
-            if rel.Relationship == RelationProcessorCore {
+            if relationship == RelationProcessorCore {
                 cores += 1;
-            } else if rel.Relationship == RelationProcessorPackage {
+            } else if relationship == RelationProcessorPackage {
                 packages += 1;
             }
-            ptr = ptr.add(rel.Size as usize);
+            ptr = ptr.add(size);
         }
         (cores, packages)
     }
@@ -844,7 +860,7 @@ impl Pdh {
         if buf_size == 0 {
             return Vec::new();
         }
-        let mut buf = vec![0u8; buf_size as usize];
+        let mut buf = aligned_buf(buf_size as usize);
         let status = unsafe {
             PdhGetFormattedCounterArrayW(
                 h,
@@ -858,7 +874,10 @@ impl Pdh {
             return Vec::new();
         }
         let item_size = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
-        let base = buf.as_ptr();
+        if (count as usize).saturating_mul(item_size) > buf.len() * 8 {
+            return Vec::new(); // never index past what PDH actually wrote
+        }
+        let base = buf.as_ptr() as *const u8;
         let mut out = Vec::with_capacity(count as usize);
         for i in 0..count as usize {
             let item = unsafe { &*(base.add(i * item_size) as *const PDH_FMT_COUNTERVALUE_ITEM_W) };
