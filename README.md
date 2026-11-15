@@ -45,7 +45,7 @@ docs/               headless-rendered page screenshots
 
 ## Install
 
-The Linux x86_64 build is [rstmog 0.2.0](https://github.com/jcgit1/rsTMOG/releases/tag/v0.2.0). No Rust toolchain is required. Vulkan, the NVIDIA driver, and libxkbcommon stay on your machine. GTK 3 for the tray is inside the AppImage. It needs glibc 2.35 and Linux 3.2 or newer (Ubuntu 22.04 and later).
+The Linux x86_64 build is [rstmog 0.2.0](https://github.com/jcgit1/rsTMOG/releases/tag/v0.2.0). No Rust toolchain is required. Vulkan, the NVIDIA driver, and libxkbcommon stay on your machine. The tray talks to the desktop over the session bus and does not bundle GTK. It needs glibc 2.35 and Linux 3.2 or newer (Ubuntu 22.04 and later).
 
 ```sh
 cd /tmp
@@ -85,30 +85,17 @@ To rebuild the AppImage (Docker, Ubuntu 22.04): `bash packaging/appimage/build.s
 
 ## Building
 
-Rust stable (edition 2024; CI pins 1.99.1). On Linux the tray stack
-(`tray-icon` → `libappindicator` → `gtk` 0.18 → `glib-sys`) probes for
-system GLib with `pkg-config` while compiling. A missing `glib-2.0.pc`
-stops the build here:
-
-```
-warning: glib-sys@0.18.1:
-error: failed to run custom build command for glib-sys v0.18.1
-```
-
-The warning line is blank because `glib-sys` emits the `pkg-config` error
-as one `cargo:warning` whose text starts with a blank line, and that first
-line is all Cargo prints. A missing `pkg-config` binary and a missing
-`glib-2.0.pc` both land on this same message. Install the packages below
-and rebuild. The window still opens when the session has no tray; these
-packages are what the compile needs. libayatana is the shared library the
-tray dlopens at runtime.
+Rust stable (edition 2024; CI pins 1.99.1). The window uses X11 or
+Wayland through winit, and the tray is a StatusNotifier item over the
+session bus, so the build does not need GTK or libayatana. Install the
+packages below and rebuild. The window still opens when the session has
+no StatusNotifier watcher; the tray is the only thing that needs one.
 
 Debian / Ubuntu (the same packages the AppImage build installs):
 
 ```sh
 sudo apt-get install --no-install-recommends \
   build-essential pkg-config \
-  libgtk-3-dev libayatana-appindicator3-dev \
   libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
   libxkbcommon-dev libwayland-dev
 ```
@@ -116,15 +103,14 @@ sudo apt-get install --no-install-recommends \
 Arch / CachyOS:
 
 ```sh
-sudo pacman -S --needed base-devel pkgconf gtk3 libayatana-appindicator \
+sudo pacman -S --needed base-devel pkgconf \
   libx11 libxcursor libxi libxrandr libxkbcommon wayland
 ```
 
 Fedora:
 
 ```sh
-sudo dnf install gcc pkgconf-pkg-config gtk3-devel \
-  libayatana-appindicator-gtk3 \
+sudo dnf install gcc pkgconf-pkg-config \
   libX11-devel libXcursor-devel libXi-devel libXrandr-devel \
   libxkbcommon-devel wayland-devel
 ```

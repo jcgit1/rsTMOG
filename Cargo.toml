@@ -23,21 +23,16 @@ wgpu = { version = "27", default-features = false, features = ["vulkan", "gles"]
 # Icons: window/tray icon from assets/icons (package README guidance)
 image = { version = "0.25", default-features = false, features = ["png"] }
 dark-light = "2"
-# System tray (GTK/libappindicator on Linux only). libxdo (accelerators)
-# is off: the tray menu here uses none and the lib isn't installed on this
-# box. On Windows tray-icon uses Shell_NotifyIcon — no extra deps.
-tray-icon = { version = "0.20", default-features = false }
+# System tray. Linux uses KSNI (StatusNotifier over D-Bus) so the build
+# does not link GTK or the unsound glib 0.18 crate. libxdo stays off:
+# the tray menu uses no accelerators. Windows uses Shell_NotifyIcon.
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 
 # Support
 anyhow = "1"
 crossbeam-channel = "0.5"
 thiserror = "2"
 tmog-core = { path = "crates/tmog-core" }
-
-# Linux-only: the GTK tray backend (see traythread).
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
-glib = "0.18"
 
 [dev-dependencies]
 insta = "1"

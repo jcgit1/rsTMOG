@@ -163,15 +163,14 @@ PNGs + SVGs) lives in `assets/icons/{light,dark}/`.
 - [x] Window/taskbar icon: theme-aware (`ViewportBuilder::with_icon`,
       64 px); dark/light picked from the persisted theme, falling back to
       the OS `dark-light` preference
-- [x] System tray (`tray-icon` + GTK on a dedicated thread — Linux needs
-      gtk::init + a GTK main loop on the owning thread; muda items are Rc/
-      !Send so the handle stays on the tray thread): icon + tooltip +
-      menu Open / Refresh rate 500|1000|2000 ms (checked = current) /
-      Quit. Events bridge to the eframe loop over channels; Open shows+
-      focuses, Quit closes (persisting settings), rate changes flow
-      through sampler.set_refresh_ms + settings save + tray tick sync.
-      Honest degradation: no StatusNotifier/GTK → app runs with no tray
-      (spawn returns None within 2 s).
+- [x] System tray (`tray-icon` KSNI on Linux, Shell_NotifyIcon on
+      Windows, on a dedicated thread): icon + tooltip + menu Open /
+      Refresh rate 500|1000|2000 ms (checked = current) / Quit. Events
+      bridge to the eframe loop over channels; Open shows+focuses, Quit
+      closes (persisting settings), rate changes flow through
+      sampler.set_refresh_ms + settings save + tray tick sync.
+      Honest degradation: no StatusNotifier watcher → app runs with no
+      tray (spawn returns None within 2 s).
 - [x] Taskbar identity: `with_app_id("rstmog")` + full title
       "rsTMOG — Task Manager OG" so KDE matches the .desktop entry
 - [x] packaging/rstmog.desktop (Name/GenericName/Categories/Keywords +
@@ -180,9 +179,9 @@ PNGs + SVGs) lives in `assets/icons/{light,dark}/`.
       verified installed for this user). Upstream README note honored:
       desktop icon does NOT auto-switch with the DE theme — we ship the
       dark variant
-- Note: tray-icon built with default-features=false (libxdo off — lib not
-  on this box, accelerators unused). gtk/glib pinned to the 0.18 series
-  matching muda 0.16.
+- Note: tray-icon 0.26 built with default-features=false and the `ksni`
+  feature (libxdo off, accelerators unused). That drops the gtk 0.18 /
+  glib 0.18 stack (RUSTSEC-2024-0429).
 
 ## Phase 4.5 — Polling cost (user-flagged 2026-10-31)
 

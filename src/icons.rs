@@ -5,10 +5,9 @@
 //! ice-blue serif T on near-black / gray). Selection follows the user's
 //! theme setting when set, otherwise the system dark/light preference.
 //!
-//! On Linux the tray is implemented with GTK/libappindicator, so it is
-//! built on a dedicated thread that owns `gtk::init` + the GTK main loop
-//! (eframe/winit never initialize GTK). Menu events flow through muda's
-//! global `MenuEvent::receiver()`, which the eframe loop polls.
+//! On Linux the tray is a StatusNotifier item over the session bus. Menu
+//! events flow through muda's global `MenuEvent::receiver()`, which the
+//! tray thread polls.
 
 use eframe::egui;
 

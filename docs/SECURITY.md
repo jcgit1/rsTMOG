@@ -3,31 +3,19 @@
 Audited 2026-11-05 with `cargo audit` + `cargo deny check advisories`
 (the GitHub Dependabot "moderate" alert was one of these).
 
-## Unsound: glib (RUSTSEC-2024-0429) — ignored, unreachable
+## Unsound: glib (RUSTSEC-2024-0429) — removed
 
 **What:** `glib::VariantStrIter`'s `Iterator` impls passed a C out-argument
-behind `&`, which optimizations could drop → NULL deref/UB. Advisory:
+behind `&`, which optimizations could drop → NULL deref/UB. Vulnerable
+range is glib 0.15.0 through 0.19.x. Advisory:
 https://rustsec.org/advisories/RUSTSEC-2024-0429
 
-**Reachability in rsTMOG:** none. glib arrives via the Linux system-tray
-stack (`tray-icon` → `libappindicator`/`muda` → `gtk` → `glib`) and our own
-direct `gtk`/`glib` deps. The only glib calls in the tree we make are
-`gtk::init`, `glib::timeout_add_local` and `gtk::main` (`src/traythread.rs`);
-`glib::Variant` / `VariantStrIter` is used nowhere. The vulnerable code is
-never executed.
-
-**Why not upgraded:** no patched 0.18.x exists (fix landed in glib ≥ 0.20 /
-0.22 lines), and `tray-icon` 0.20 and `muda`'s `gtk3` feature both pin the
-gtk-0.18 stack. A clean move would mean switching `tray-icon` to its `ksni`
-(D-Bus StatusNotifier) backend and dropping our direct gtk dep — viable, but
-a tray-behavior change worth its own ticket, not a drive-by fix.
-`cargo audit` still reports it; the ignore lives only in `deny.toml`
-(`cargo deny check`). `Cargo.lock` is committed (2026-11-13), so release
-builds use exactly the reviewed dependency versions (`cargo build --locked`
-in `packaging/appimage/inside.sh`).
-
-**Action:** ignored in `deny.toml` with a full rationale. Revisit if we ever
-touch `glib::Variant` APIs, or do the ksni migration.
+**Resolution (2026-11-15):** the crate is gone from the tree. The Linux
+tray now uses `tray-icon` 0.26 with the `ksni` feature (StatusNotifier
+over the session bus) and no longer depends on `gtk` or `glib`. No
+patched 0.18.x exists, and `gtk` 0.18 cannot take `glib` 0.20, so the
+upgrade path was to leave that stack. `deny.toml` no longer ignores the
+advisory.
 
 ## Unmaintained (warnings) — async-std / zbus / zvariant chains
 

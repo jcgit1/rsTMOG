@@ -1,16 +1,10 @@
 //! System tray on its own thread.
 //!
-//! Linux requires `gtk::init` + a GTK main loop on the owning thread
-//! (eframe/winit never init GTK), so the GTK path below runs there and
-//! translates muda's `Rc`-based `MenuEvent`s into app-level `TrayEvent`s
-//! over a channel the eframe loop polls; a second (upward) channel keeps
-//! the active refresh-rate tick in sync. The thread reports success over a
-//! oneshot so `spawn` can honestly return Option.
-//!
-//! On Windows the same tray works without GTK (tray-icon uses Win32
-//! Shell_NotifyIcon there); the only difference is the event pump — no
-//! GLib main loop, so this thread polls and sleeps until the app drops the
-//! handle (a dedicated `_alive` channel's disconnect is the exit signal).
+//! Linux uses tray-icon's KSNI backend. Its D-Bus service runs on a
+//! worker thread, so this thread only polls menu events until the app
+//! drops the handle. Windows uses the same pump; Shell_NotifyIcon needs
+//! no GLib loop either. The thread reports success over a oneshot so
+//! `spawn` can honestly return Option.
 
 use crate::icons::TrayEvent;
 use tray_icon::TrayIconBuilder;
@@ -37,7 +31,7 @@ impl TrayHandle {
 }
 
 /// Spawn the tray thread; returns None if the session can't host a tray
-/// (GTK init failure on Linux, Shell_NotifyIcon refusal, headless CI, …).
+/// (no StatusNotifier watcher, Shell_NotifyIcon refusal, headless CI, …).
 pub fn spawn(theme: &str, app_name: &str, initial_refresh_ms: u32) -> Option<TrayHandle> {
     let theme = theme.to_string();
     let app_name = app_name.to_string();
@@ -49,12 +43,6 @@ pub fn spawn(theme: &str, app_name: &str, initial_refresh_ms: u32) -> Option<Tra
     std::thread::Builder::new()
         .name("rstmog-tray".into())
         .spawn(move || {
-            // Used by the non-GTK pump loop below; Linux exits via gtk::main.
-            let _ = &rx_alive;
-            #[cfg(target_os = "linux")]
-            if gtk::init().is_err() {
-                return; // tx_ok dropped -> spawn() returns None
-            }
             let open_id = MenuId::new("rstmog-open");
             let quit_id = MenuId::new("rstmog-quit");
             let menu = Menu::new();
@@ -98,23 +86,15 @@ pub fn spawn(theme: &str, app_name: &str, initial_refresh_ms: u32) -> Option<Tra
             };
             let _ = tx_ok.send(());
 
-            // Drain muda's global menu-event receiver and the rate-sync
-            // channel: inside the GTK main loop on Linux; in a poll loop
-            // elsewhere (Windows) that ends when the app drops the handle.
-            #[cfg(target_os = "linux")]
-            {
-                glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
-                    pump(&tx_ev, &rx_rate, &open_id, &quit_id, &rates);
-                    glib::ControlFlow::Continue
-                });
-                gtk::main();
-            }
-            #[cfg(not(target_os = "linux"))]
-            while rx_alive
-                .recv_timeout(std::time::Duration::from_millis(120))
-                .is_err()
-            {
-                pump(&tx_ev, &rx_rate, &open_id, &quit_id, &rates);
+            // Nobody sends on this channel. Timeout means the app is still
+            // up; disconnect means the handle was dropped.
+            loop {
+                match rx_alive.recv_timeout(std::time::Duration::from_millis(120)) {
+                    Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        pump(&tx_ev, &rx_rate, &open_id, &quit_id, &rates);
+                    }
+                }
             }
         })
         .ok()?;

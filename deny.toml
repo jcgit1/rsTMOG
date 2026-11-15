@@ -17,6 +17,7 @@ allow = [
     "BSL-1.0",
     "OFL-1.1",
     "Ubuntu-font-1.0",
+    "Unlicense",
 ]
 confidence-threshold = 0.8
 
@@ -27,14 +28,3 @@ multiple-versions = "warn"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-
-[advisories]
-# Unsoundness in glib::VariantStrIter's Iterator impls (UB: NULL deref via a
-# C out-argument passed behind &). We reach glib only through the tray thread
-# (gtk::init, glib::timeout_add_local, gtk::main in traythread.rs) and never
-# touch glib::Variant APIs, so the vulnerable code is unreachable in this app.
-# No patched 0.18.x exists, and the gtk-0.18 stack tray-icon 0.20 (and muda's
-# own gtk3 feature) pins glib 0.18 — a clean upgrade would mean moving to
-# tray-icon's ksni backend and dropping our direct gtk dependency entirely.
-# Revisit if we adopt Variant APIs or the gtk stack moves to patched glib.
-ignore = ["RUSTSEC-2024-0429"]
