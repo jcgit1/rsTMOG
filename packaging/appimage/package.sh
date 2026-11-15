@@ -51,13 +51,19 @@ fi
 [[ -n "$INDICATOR" ]] || { echo "libayatana-appindicator3.so.1 not found" >&2; exit 1; }
 
 # Host GPU drivers. Bundling any of these makes Vulkan or NVML fail.
+# libxkbcommon stays on the host too: libgdk needs soname .0 and only
+# symbols from 0.5.0, and the host copy understands the host Compose
+# file. Ubuntu 22.04's libxkbcommon logs "unrecognized keysym" for
+# names added later (dead_hamza and the rest).
 mapfile -t EXCLUDES < <(printf '%s\n' \
     'libvulkan.so*' \
     'libGL.so*' \
     'libGLX.so*' \
     'libGLdispatch.so*' \
     'libEGL.so*' \
-    'libnvidia*.so*')
+    'libnvidia*.so*' \
+    'libxkbcommon.so*' \
+    'libxkbcommon-x11.so*')
 EXCLUDE_ARGS=()
 for pattern in "${EXCLUDES[@]}"; do
     EXCLUDE_ARGS+=(--exclude-library "$pattern")
@@ -99,6 +105,36 @@ winner=$(printf '%s\n%s\n' "$max_glibc" "2.35" | sort -V | tail -1)
 if [[ "$winner" != "2.35" ]]; then
     echo "glibc $max_glibc is newer than Ubuntu 22.04 (2.35); build in packaging/appimage" >&2
     exit 1
+fi
+
+# The GTK plugin may still copy libxkbcommon. Drop it so libgdk's
+# $ORIGIN runpath misses it and the loader uses the host library.
+find "$APPDIR" -type f -name 'libxkbcommon*.so*' -delete
+xkb_left=$(find "$APPDIR" -type f -name 'libxkbcommon*.so*' || true)
+if [[ -n "$xkb_left" ]]; then
+    echo "libxkbcommon is still inside the AppDir:" >&2
+    echo "$xkb_left" >&2
+    exit 1
+fi
+
+# Empty on purpose. GIO scans this directory and does not fall back to
+# the host module path. A file keeps the directory in the squashfs.
+mkdir -p "$APPDIR/usr/lib/gio/modules"
+printf '%s\n' 'Empty so host gvfs is not loaded. See apprun-hooks/rstmog-host-compat.sh.' \
+    > "$APPDIR/usr/lib/gio/modules/README"
+
+cp "$ROOT/packaging/appimage/host-compat.sh" \
+    "$APPDIR/apprun-hooks/rstmog-host-compat.sh"
+if ! grep -q 'rstmog-host-compat.sh' "$APPDIR/AppRun"; then
+    awk '
+        /^exec / && !inserted {
+            print "source \"$this_dir\"/apprun-hooks/rstmog-host-compat.sh"
+            print ""
+            inserted = 1
+        }
+        { print }
+    ' "$APPDIR/AppRun" > "$APPDIR/AppRun.new"
+    mv "$APPDIR/AppRun.new" "$APPDIR/AppRun"
 fi
 
 # mktemp creates the AppDir as 0700. The runtime refuses that, because the

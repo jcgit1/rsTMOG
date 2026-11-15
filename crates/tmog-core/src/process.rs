@@ -48,14 +48,46 @@ impl Proc {
     }
 
     /// Display name: argv[0] basename for userspace procs, `[comm]` for
-    /// kernel threads.
+    /// kernel threads. Control characters and bidirectional overrides are
+    /// removed; a process chooses both strings itself, and either one can
+    /// reverse or break the rest of the row.
     pub fn display_name(&self) -> String {
         if let Some(exe) = self.cmdline.first()
             && !exe.is_empty()
         {
-            return exe.rsplit('/').next().unwrap_or(exe).to_string();
+            let base = exe.rsplit('/').next().unwrap_or(exe);
+            return visible_name(base);
         }
-        format!("[{}]", self.comm)
+        format!("[{}]", visible_name(&self.comm))
+    }
+}
+
+/// Characters that change how the rest of a cell is drawn, rather than
+/// being part of the name. Right-to-left *letters* stay: a process may
+/// legitimately be named in Arabic or Hebrew. The marks below are the
+/// overrides that reverse the Latin text around them.
+fn spoofs_table_text(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// Drop spoofing characters. A name that was only those becomes `?`, so
+/// the cell is not blank.
+fn visible_name(s: &str) -> String {
+    let cleaned: String = s.chars().filter(|c| !spoofs_table_text(*c)).collect();
+    if cleaned.is_empty() {
+        "?".into()
+    } else {
+        cleaned
     }
 }
 
@@ -453,6 +485,24 @@ mod tests {
         p.cmdline.clear();
         p.comm = "kworker/0:1".into();
         assert_eq!(p.display_name(), "[kworker/0:1]");
+    }
+
+    #[test]
+    fn display_name_strips_controls_and_bidi_overrides() {
+        let mut p = parse_stat("1 (a) S 0 1 1 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 5 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0").unwrap();
+        // U+202E reverses the characters that follow it in the cell.
+        p.cmdline = vec!["/usr/bin/evil\u{202e}ls".into()];
+        assert_eq!(p.display_name(), "evills");
+        p.cmdline = vec!["/bin/ok\nname\t\u{001b}[2J".into()];
+        assert_eq!(p.display_name(), "okname[2J");
+        p.cmdline = vec!["/usr/bin/\u{202e}\u{200f}".into()];
+        assert_eq!(p.display_name(), "?");
+        p.cmdline.clear();
+        p.comm = "kthread\u{202e}".into();
+        assert_eq!(p.display_name(), "[kthread]");
+        // Letters with an inherent RTL direction are part of the name.
+        p.cmdline = vec!["/usr/bin/محرر".into()];
+        assert_eq!(p.display_name(), "محرر");
     }
 
     #[test]
