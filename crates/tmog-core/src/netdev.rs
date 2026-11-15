@@ -186,7 +186,18 @@ unsafe extern "C" {
     fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize;
     fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize;
     fn close(fd: i32) -> i32;
+    fn setsockopt(fd: i32, level: i32, name: i32, val: *const Timeval, len: u32) -> i32;
 }
+
+#[repr(C)]
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+const SOL_SOCKET: i32 = 1;
+const SO_RCVTIMEO: i32 = 20;
+/// A dump bigger than this is not a route table; stop rather than grow.
+const NL_MAX_DUMP: usize = 16 << 20;
 
 fn u32le(b: &[u8], i: usize) -> u32 {
     (b[i] as u32) | (b[i + 1] as u32) << 8 | (b[i + 2] as u32) << 16 | (b[i + 3] as u32) << 24
@@ -217,6 +228,24 @@ fn nl_dump(msg_type: u16, payload: &[u8]) -> Option<Vec<u8>> {
             pid: 0,
             groups: 0,
         };
+        // Never block forever: this runs on the sampler thread, and a
+        // stalled reply would freeze every page. recv fails after 1 s and
+        // we degrade to "no addresses".
+        let tv = Timeval {
+            tv_sec: 1,
+            tv_usec: 0,
+        };
+        if setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &tv,
+            std::mem::size_of::<Timeval>() as u32,
+        ) != 0
+        {
+            close(fd);
+            return None;
+        }
         if connect(fd, &addr, std::mem::size_of::<SockaddrNl>() as u32) != 0 {
             close(fd);
             return None;
@@ -235,6 +264,10 @@ fn nl_dump(msg_type: u16, payload: &[u8]) -> Option<Vec<u8>> {
                 return None;
             }
             out.extend_from_slice(&buf[..n as usize]);
+            if out.len() > NL_MAX_DUMP {
+                close(fd);
+                return None;
+            }
             // Scan the ENTIRE accumulated buffer every pass: DONE may sit
             // mid-chunk or at the start of the next one — the earlier
             // per-chunk scan missed it and discarded the whole dump

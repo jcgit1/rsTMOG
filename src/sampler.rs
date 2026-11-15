@@ -332,12 +332,16 @@ impl Sampler {
                             .snapshot
                             .procs
                             .iter()
-                            .find(|r| r.proc.pid == pid)
+                            // same process only: a reused pid's counters
+                            // belong to a different process
+                            .find(|r| r.proc.pid == pid && r.proc.starttime == p.starttime)
                             .map(|r| &r.proc);
                         // aggregate ticks accumulated SINCE the previous
                         // row pass (since_ticks covers all ticks, so use
-                        // it directly — it equals the row window)
-                        let total_delta = (self.agg_ticks - self.row_pass_ticks).max(1);
+                        // it directly — it equals the row window).
+                        // Saturating: totals can step back (virtualized
+                        // /proc/stat in some containers).
+                        let total_delta = self.agg_ticks.saturating_sub(self.row_pass_ticks).max(1);
                         let cpu_pct = prev.and_then(|pv| {
                             tmog_core::process_table::cpu_percent(pv, &p, total_delta)
                         });
@@ -646,6 +650,33 @@ mod tests {
         // small requests are served whole
         let small = [5u32, 6, 7];
         assert_eq!(Sampler::detail_batch(&small, &mut cursor), small.to_vec());
+    }
+
+    #[test]
+    fn reused_pid_gets_no_cpu_from_the_old_process() {
+        let mut s = Sampler::new();
+        s.tick();
+        let me = std::process::id();
+        // Pretend the previous row for our pid was a different process
+        // (same pid, other start time) with far fewer CPU ticks.
+        for r in s.snapshot.procs.iter_mut().filter(|r| r.proc.pid == me) {
+            r.proc.starttime = r.proc.starttime.wrapping_add(1);
+            r.proc.utime = 0;
+            r.proc.stime = 0;
+        }
+        // run to the next row pass
+        for _ in 0..10 {
+            s.tick();
+            if s.last_tick_was_row() {
+                break;
+            }
+        }
+        assert!(s.last_tick_was_row(), "no row pass happened");
+        let row = s.snapshot.procs.iter().find(|r| r.proc.pid == me).unwrap();
+        assert_eq!(
+            row.cpu, None,
+            "CPU% must not be computed against another process"
+        );
     }
 
     #[test]
