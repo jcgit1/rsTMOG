@@ -28,3 +28,10 @@ multiple-versions = "warn"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+# Vulnerabilities still fail the check. Unmaintained advisories fail only
+# for crates we depend on directly; the transitive ones (async-std and the
+# zbus/zvariant chain via dark-light and ksni, ttf-parser via egui) have no
+# replacement we control. See docs/SECURITY.md.
+unmaintained = "workspace"
