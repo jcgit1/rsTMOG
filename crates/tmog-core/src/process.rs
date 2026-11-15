@@ -35,22 +35,30 @@ pub struct Proc {
     pub last_cpu: u32,
     /// username resolved from /etc/passwd (None if unknown)
     pub user: Option<String>,
-    /// argv, NUL-separated in procfs; empty for kernel threads
+    /// argv, NUL-separated in procfs. Empty both before the slow tier
+    /// has read it and for kernel threads; `kthread` tells those apart.
     pub cmdline: Vec<String>,
+    /// `PF_KTHREAD` in stat field 9. Set on the cheap pass, so a row
+    /// whose cmdline has not been read yet is not drawn as a kernel thread.
+    pub kthread: bool,
 }
 
+/// `PF_KTHREAD` in the kernel task flags (stat field 9). A userspace
+/// task does not have this bit set.
+const PF_KTHREAD: u64 = 0x0020_0000;
+
 impl Proc {
-    /// Kernel threads have empty cmdline and live at pid <= 2's children
-    /// like kthreadd; the practical tell we use (like the C++ reference):
-    /// empty cmdline → render as `[comm]`.
+    /// Kernel thread, from the `PF_KTHREAD` bit in stat. An empty cmdline
+    /// is not enough: the cheap pass has not read cmdline yet, and that
+    /// used to draw every userspace process as `[comm]`.
     pub fn is_kernel_thread(&self) -> bool {
-        self.cmdline.is_empty()
+        self.kthread
     }
 
-    /// Display name: argv[0] basename for userspace procs, `[comm]` for
-    /// kernel threads. Control characters and bidirectional overrides are
-    /// removed; a process chooses both strings itself, and either one can
-    /// reverse or break the rest of the row.
+    /// Display name: argv[0] basename once cmdline is loaded, bare `comm`
+    /// until then, `[comm]` for a kernel thread. Control characters and
+    /// bidirectional overrides are removed; a process chooses both strings
+    /// itself, and either one can reverse or break the rest of the row.
     pub fn display_name(&self) -> String {
         if let Some(exe) = self.cmdline.first()
             && !exe.is_empty()
@@ -58,7 +66,12 @@ impl Proc {
             let base = exe.rsplit('/').next().unwrap_or(exe);
             return visible_name(base);
         }
-        format!("[{}]", visible_name(&self.comm))
+        let comm = visible_name(&self.comm);
+        if self.kthread {
+            format!("[{comm}]")
+        } else {
+            comm
+        }
     }
 }
 
@@ -132,6 +145,7 @@ pub fn parse_stat(text: &str) -> Result<Proc, String> {
         uid: None,
         user: None,
         cmdline: Vec::new(),
+        kthread: num(9) & PF_KTHREAD != 0,
     })
 }
 
@@ -482,7 +496,13 @@ mod tests {
         let mut p = parse_stat("1 (a) S 0 1 1 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 5 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0").unwrap();
         p.cmdline = vec!["/usr/lib/systemd/systemd-journald".into()];
         assert_eq!(p.display_name(), "systemd-journald");
+        // cmdline not read yet, and the flags are not PF_KTHREAD:
+        // bare comm, not a bracketed kernel-thread name
         p.cmdline.clear();
+        p.comm = "firefox".into();
+        assert!(!p.is_kernel_thread());
+        assert_eq!(p.display_name(), "firefox");
+        p.kthread = true;
         p.comm = "kworker/0:1".into();
         assert_eq!(p.display_name(), "[kworker/0:1]");
     }
@@ -498,6 +518,7 @@ mod tests {
         p.cmdline = vec!["/usr/bin/\u{202e}\u{200f}".into()];
         assert_eq!(p.display_name(), "?");
         p.cmdline.clear();
+        p.kthread = true;
         p.comm = "kthread\u{202e}".into();
         assert_eq!(p.display_name(), "[kthread]");
         // Letters with an inherent RTL direction are part of the name.
@@ -529,10 +550,18 @@ mod tests {
         assert_eq!(p.rss_bytes, 100 * 4096);
         assert_eq!(p.cmdline, vec!["/opt/myapp", "--flag"]);
         assert!(!p.is_kernel_thread());
-        // kernel-thread fixture: empty cmdline
+        // kernel-thread fixture: PF_KTHREAD in stat, empty cmdline
         let k = collect_one(&root, 2, 4096, &passwd).unwrap();
         assert!(k.is_kernel_thread());
         assert_eq!(k.display_name(), "[kthreadd]");
+        // cheap pass has no cmdline, but still knows which rows are kernel threads
+        let cheap = collect_stat_only(&root, 4321, 4096).unwrap();
+        assert!(cheap.cmdline.is_empty());
+        assert!(!cheap.is_kernel_thread());
+        assert_eq!(cheap.display_name(), "my app (test)");
+        let cheap_k = collect_stat_only(&root, 2, 4096).unwrap();
+        assert!(cheap_k.is_kernel_thread());
+        assert_eq!(cheap_k.display_name(), "[kthreadd]");
         // missing pid dir → error, no panic
         assert!(collect_one(&root, 99999, 4096, &passwd).is_err());
     }

@@ -269,6 +269,7 @@ unsafe fn proc_from_entry(entry: &PROCESSENTRY32W) -> Proc {
         uid: None,
         user: process_owner(pid),
         cmdline: Vec::new(),
+        kthread: false,
     };
 
     let Some(h) = open_process_limited(pid) else {
