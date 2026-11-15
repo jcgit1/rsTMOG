@@ -40,6 +40,10 @@ pub struct App {
     show_settings: bool,
     /// selected logical core on the CPU page (None = no core panel)
     cpu_core_panel: Option<usize>,
+    /// single-clicked core; the hint stays up until another click or a double-click
+    cpu_preview: Option<usize>,
+    /// last settings-save failure; shown until a later save succeeds
+    settings_error: Option<String>,
     timer_started: bool,
     /// async process actions: EndTask runs on a worker thread; results
     /// come back over this channel and become footer toasts
@@ -74,6 +78,8 @@ impl App {
             tray: None,
             show_settings: false,
             cpu_core_panel: None,
+            cpu_preview: None,
+            settings_error: None,
             timer_started: false,
             action_tx,
             action_rx,
@@ -88,21 +94,6 @@ impl App {
             tray.set_refresh(self.settings.refresh_ms);
         }
         self
-    }
-
-    /// Pids in the table's current display order, first `n` of them
-    /// (mirrors the filter+sort the page performs, without re-drawing).
-    fn visible_pids(&self, snap: &crate::sampler::Snapshot, n: usize) -> Vec<u32> {
-        use tmog_core::process_table;
-        let mut rows: Vec<_> = snap
-            .procs
-            .iter()
-            .filter(|r| process_table::matches(r, &self.proc_state.filter))
-            .cloned()
-            .collect();
-        process_table::sort_rows(&mut rows, self.proc_state.sort, self.proc_state.dir);
-        rows.truncate(n);
-        rows.iter().map(|r| r.proc.pid).collect()
     }
 
     /// Drain tray menu events into app behavior.
@@ -151,6 +142,8 @@ impl App {
             tray: None,
             show_settings: false,
             cpu_core_panel: None,
+            cpu_preview: None,
+            settings_error: None,
             timer_started: false,
             action_tx,
             action_rx,
@@ -203,9 +196,31 @@ impl App {
     }
 }
 
-/// Rows we ask to have rss/cmdline/user populated for (a generous
-/// viewport estimate at the default window height).
-const VISIBLE_ROWS: usize = 40;
+/// Pids to enrich this frame. `selected` is first (refreshed every tick).
+/// `on_screen` follows, in the order the table drew them. `widen_to`, when
+/// non-empty, is the rest of the process list: a cmdline filter or a name
+/// sort cannot see rows that have not been read yet, so those rotate
+/// through the sampler's batch after the rows on screen.
+fn detail_interest(selected: Option<u32>, on_screen: &[u32], widen_to: &[u32]) -> Vec<u32> {
+    let mut pids = Vec::with_capacity(on_screen.len() + widen_to.len() + 1);
+    if let Some(sel) = selected {
+        pids.push(sel);
+    }
+    for &pid in on_screen {
+        if Some(pid) != selected {
+            pids.push(pid);
+        }
+    }
+    if !widen_to.is_empty() {
+        let have: std::collections::HashSet<u32> = pids.iter().copied().collect();
+        for &pid in widen_to {
+            if !have.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -318,15 +333,19 @@ impl eframe::App for App {
                     if ui.button("Save now").clicked() {
                         persist_now = true;
                     }
-                    if persist_now
-                        && let Err(e) = tmog_core::settings::save(
+                    if persist_now {
+                        match tmog_core::settings::save(
                             &tmog_core::settings::default_path(),
                             &self.settings,
-                        )
-                    {
+                        ) {
+                            Ok(()) => self.settings_error = None,
+                            Err(e) => self.settings_error = Some(e.to_string()),
+                        }
+                    }
+                    if let Some(err) = &self.settings_error {
                         ui.colored_label(
                             egui::Color32::from_rgb(230, 120, 120),
-                            format!("save failed: {e}"),
+                            format!("save failed: {err}"),
                         );
                     }
                 });
@@ -386,28 +405,43 @@ impl eframe::App for App {
             self.render_central(ui, &snap_arc, self.page);
         });
 
-        // slow tier: ask the sampler to enrich the pids we can actually
-        // see. The selection goes first: the sampler refreshes the first
-        // pid every tick and rotates the rest.
+        // slow tier: enrich what the table actually drew (selection first).
+        // A cmdline filter or a name sort also walks the rest, because
+        // those rows cannot match until cmdline has been read.
         if self.page == Page::Processes {
-            let mut pids: Vec<u32> = Vec::with_capacity(VISIBLE_ROWS + 1);
-            if let Some(sel) = self.proc_state.selected {
-                pids.push(sel);
-            }
-            for pid in self.visible_pids(&snap_arc, VISIBLE_ROWS) {
-                if Some(pid) != self.proc_state.selected {
-                    pids.push(pid);
-                }
-            }
+            let widen: Vec<u32> = if !self.proc_state.filter.is_empty()
+                || self.proc_state.sort == tmog_core::process_table::SortKey::Name
+            {
+                snap_arc.procs.iter().map(|r| r.proc.pid).collect()
+            } else {
+                Vec::new()
+            };
+            let pids =
+                detail_interest(self.proc_state.selected, &self.proc_state.on_screen, &widen);
             self.sampler.request_detail(&pids);
         }
-        // CPU page core panel: enrich the pids it lists (the sampler
-        // rotates through them 25 per tick)
+        // CPU page core panel: enrich the rows it shows (top 60 by CPU),
+        // not the pid-sorted core list. The sampler rotates past 25.
         if self.page == Page::Cpu
             && let Some(core) = self.cpu_core_panel
             && let Some(pids) = snap_arc.core_usage.get(&(core as u32))
         {
-            self.sampler.request_detail(pids);
+            let cpu_of = |pid: u32| {
+                snap_arc
+                    .procs
+                    .iter()
+                    .find(|r| r.proc.pid == pid)
+                    .and_then(|r| r.cpu)
+                    .unwrap_or(0.0)
+            };
+            let mut ranked = pids.clone();
+            ranked.sort_by(|a, b| {
+                cpu_of(*b)
+                    .partial_cmp(&cpu_of(*a))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            ranked.truncate(60);
+            self.sampler.request_detail(&ranked);
         }
 
         // async end-task (and anything else) reporting back: drain into toasts
@@ -568,7 +602,7 @@ impl App {
     ) {
         match page {
             Page::Summary => pages::summary_ui(ui, snap),
-            Page::Cpu => pages::cpu_ui(ui, snap, &mut self.cpu_core_panel),
+            Page::Cpu => pages::cpu_ui(ui, snap, &mut self.cpu_core_panel, &mut self.cpu_preview),
             Page::Memory => pages::memory_ui(ui, snap),
             Page::Disks => pages::disks_ui(ui, snap),
             Page::Network => pages::network_ui(ui, snap),
@@ -749,5 +783,25 @@ mod menu_tests {
             app.proc_state.pending_action,
             Some(proc_table::ProcAction::ForceKill(_))
         ));
+    }
+
+    #[test]
+    fn on_screen_is_the_rows_the_table_drew() {
+        let (_ctx, app, _pid, _cell) = setup();
+        assert!(
+            !app.proc_state.on_screen.is_empty(),
+            "the viewport should report the rows it drew"
+        );
+        let all: std::collections::HashSet<u32> =
+            app.snap.procs.iter().map(|r| r.proc.pid).collect();
+        assert!(app.proc_state.on_screen.iter().all(|p| all.contains(p)));
+    }
+
+    #[test]
+    fn detail_interest_puts_selection_and_screen_ahead_of_the_rest() {
+        let pids = detail_interest(Some(7), &[7, 2, 3], &[1, 2, 3, 9]);
+        assert_eq!(pids, vec![7, 2, 3, 1, 9]);
+        let screen_only = detail_interest(None, &[4, 5], &[]);
+        assert_eq!(screen_only, vec![4, 5]);
     }
 }

@@ -278,7 +278,12 @@ fn gpu_summary_line(g: &tmog_core::gpu::GpuInfo) -> String {
     )
 }
 
-pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize>) {
+pub fn cpu_ui(
+    ui: &mut egui::Ui,
+    s: &Snapshot,
+    core_panel_mut: &mut Option<usize>,
+    preview: &mut Option<usize>,
+) {
     let mut core_panel = *core_panel_mut;
     ui.heading(format!("CPU — {} busy", dash(s.aggregate, "%")));
     if !s.hist_cpu.is_empty() {
@@ -332,12 +337,11 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
                 .size(11.0),
         );
     }
-    // per-core grid: single-click = transient preview (highlight only),
-    // double-click = commit the "tasks on this core" panel. Attribution
-    // is approximate; see the panel's own disclaimer.
+    // per-core grid: single-click highlights and leaves a hint up until
+    // the next click; double-click commits the "tasks on this core" panel.
+    // Attribution is approximate; see the panel's own disclaimer.
     let cols = (s.per_core.len() as f32).sqrt().ceil().max(1.0) as usize;
     let mut activated: Option<usize> = None; // double-click -> toggle panel
-    let mut preview: Option<usize> = None; // single-click -> highlight
     let mut clear_sel = false;
     egui::Grid::new("cores")
         .num_columns(cols)
@@ -359,11 +363,12 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
                 let resp = resp.interact(egui::Sense::click());
                 if resp.double_clicked() {
                     activated = Some(i);
+                    *preview = None;
                 } else if resp.clicked() {
-                    preview = Some(i);
+                    *preview = Some(i);
                 }
                 // highlight: the committed panel's core, else a preview click
-                let hot = activated.or(preview).or(core_panel) == Some(i);
+                let hot = activated.or(*preview).or(core_panel) == Some(i);
                 if hot {
                     ui.painter().rect_stroke(
                         resp.rect,
@@ -386,7 +391,7 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
     }
     // a single-click preview that isn't the open core shows a one-line
     // hint instead of jumping straight into the panel
-    if let Some(i) = preview.filter(|p| *p != core_panel.unwrap_or(usize::MAX)) {
+    if let Some(i) = (*preview).filter(|p| *p != core_panel.unwrap_or(usize::MAX)) {
         let n = s.core_usage.get(&(i as u32)).map(|v| v.len()).unwrap_or(0);
         ui.label(
             egui::RichText::new(format!(

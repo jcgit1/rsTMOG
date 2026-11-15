@@ -35,6 +35,10 @@ pub struct ProcTableState {
     /// "Force kill" was clicked once for this process; the next click
     /// confirms (no single-click SIGKILL)
     pub confirm_kill: Option<ProcRef>,
+    /// Pids whose rows intersected the viewport on the last draw.
+    /// This is the interest set the sampler enriches; App does not
+    /// re-derive it from sort order.
+    pub on_screen: Vec<u32>,
 }
 
 impl ProcTableState {
@@ -183,6 +187,7 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
 
     let mut rows_rects: Vec<egui::Rect> = Vec::new();
     let mut sel_row: Option<usize> = None;
+    st.on_screen.clear();
 
     egui::ScrollArea::vertical()
         .id_salt("proc_body")
@@ -289,6 +294,9 @@ pub fn processes_table_ui(ui: &mut egui::Ui, s: &Snapshot, st: &mut ProcTableSta
                             sel_row = Some(rows_rects.len());
                         }
                         rows_rects.push(row_rect);
+                        if ui.clip_rect().intersects(row_rect) {
+                            st.on_screen.push(pid);
+                        }
 
                         if resp.clicked() {
                             clicked_pid = Some(pid);

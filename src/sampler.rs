@@ -205,6 +205,10 @@ impl Sampler {
     pub fn request_detail(&mut self, pids: &[u32]) {
         if self.detail_pids != pids {
             self.detail_pids = pids.to_vec();
+            // A new set starts at the front: selection and the rows on
+            // screen are placed there, so a scroll or a filter does not
+            // wait behind the previous cursor.
+            self.detail_cursor = 0;
         }
     }
 
