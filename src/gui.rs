@@ -81,17 +81,13 @@ impl App {
         }
     }
 
-    /// Build the app with the system tray wired in (real GUI only).
-    pub fn with_tray(
-        _cc: &eframe::CreationContext<'_>,
-        tray: Option<crate::traythread::TrayHandle>,
-    ) -> Self {
-        let mut app = App::new();
-        app.tray = tray;
-        if let Some(tray) = &app.tray {
-            tray.set_refresh(app.settings.refresh_ms);
+    /// Wire the system tray into the app (real GUI only).
+    pub fn with_tray(mut self, tray: Option<crate::traythread::TrayHandle>) -> Self {
+        self.tray = tray;
+        if let Some(tray) = &self.tray {
+            tray.set_refresh(self.settings.refresh_ms);
         }
-        app
+        self
     }
 
     /// Pids in the table's current display order, first `n` of them
@@ -391,18 +387,22 @@ impl eframe::App for App {
         });
 
         // slow tier: ask the sampler to enrich the pids we can actually
-        // see (first `visible_rows` of the current sort + selection)
+        // see. The selection goes first: the sampler refreshes the first
+        // pid every tick and rotates the rest.
         if self.page == Page::Processes {
-            let mut pids: Vec<u32> = self.visible_pids(&snap_arc, VISIBLE_ROWS);
-            if let Some(sel) = self.proc_state.selected
-                && !pids.contains(&sel)
-            {
+            let mut pids: Vec<u32> = Vec::with_capacity(VISIBLE_ROWS + 1);
+            if let Some(sel) = self.proc_state.selected {
                 pids.push(sel);
+            }
+            for pid in self.visible_pids(&snap_arc, VISIBLE_ROWS) {
+                if Some(pid) != self.proc_state.selected {
+                    pids.push(pid);
+                }
             }
             self.sampler.request_detail(&pids);
         }
-        // CPU page core panel: enrich the pids it lists (they're a small
-        // set; the sampler batches to 25/tick)
+        // CPU page core panel: enrich the pids it lists (the sampler
+        // rotates through them 25 per tick)
         if self.page == Page::Cpu
             && let Some(core) = self.cpu_core_panel
             && let Some(pids) = snap_arc.core_usage.get(&(core as u32))
@@ -594,14 +594,16 @@ pub fn run() -> anyhow::Result<()> {
     eframe::run_native(
         "rsTMOG",
         opts,
-        Box::new(|cc| {
+        // The window runs the same App (and its one sampler thread) that
+        // supplied the icon theme above.
+        Box::new(move |_cc| {
             // System tray with Open / refresh-rate / Quit menu. Best-effort:
             // platforms without a tray (some Wayland setups) continue without.
             let tray = crate::traythread::spawn("dark", "rsTMOG", 1000);
             if tray.is_none() {
                 eprintln!("tray: unavailable on this desktop session");
             }
-            Ok(Box::new(App::with_tray(cc, tray)))
+            Ok(Box::new(app.with_tray(tray)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))

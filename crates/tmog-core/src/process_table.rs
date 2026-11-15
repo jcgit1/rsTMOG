@@ -99,12 +99,14 @@ pub fn sort_rows(rows: &mut [Row], key: SortKey, dir: SortDir) {
                 .partial_cmp(&b.cpu.unwrap_or(0.0))
                 .unwrap_or(Ordering::Equal),
             SortKey::Mem => a.mem_bytes().cmp(&b.mem_bytes()),
-            SortKey::User => a
-                .proc
-                .user
-                .as_deref()
-                .unwrap_or("")
-                .cmp(b.proc.user.as_deref().unwrap_or("")),
+            // an unknown user is not the empty name: it sorts after every
+            // known one in both directions
+            SortKey::User => match (a.proc.user.as_deref(), b.proc.user.as_deref()) {
+                (Some(x), Some(y)) => x.cmp(y),
+                (Some(_), None) => return Ordering::Less,
+                (None, Some(_)) => return Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
             SortKey::Threads => a.proc.threads.cmp(&b.proc.threads),
         };
         let ord = match dir {
@@ -248,6 +250,23 @@ mod tests {
         sort_rows(&mut rows, SortKey::Cpu, SortDir::Desc);
         let pids: Vec<u32> = rows.iter().map(|r| r.proc.pid).collect();
         assert_eq!(pids, vec![10, 20, 30]); // equal cpu desc: still pid-asc tiebreak
+    }
+
+    #[test]
+    fn unknown_user_sorts_last_both_ways() {
+        let mut rows = vec![
+            row(1, 0, "a", 0, None),
+            row(2, 0, "b", 0, None),
+            row(3, 0, "c", 0, None),
+        ];
+        rows[0].proc.user = Some("root".into());
+        rows[2].proc.user = Some("jcain".into());
+        sort_rows(&mut rows, SortKey::User, SortDir::Asc);
+        let pids: Vec<u32> = rows.iter().map(|r| r.proc.pid).collect();
+        assert_eq!(pids, vec![3, 1, 2]);
+        sort_rows(&mut rows, SortKey::User, SortDir::Desc);
+        let pids: Vec<u32> = rows.iter().map(|r| r.proc.pid).collect();
+        assert_eq!(pids, vec![1, 3, 2]);
     }
 
     #[test]

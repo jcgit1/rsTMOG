@@ -4,8 +4,8 @@
 //! The kernel's `MemAvailable` ignores the ZFS ARC entirely, so a box with
 //! a huge ARC looks almost out of memory (the evildojo incident: 89% "used"
 //! when 62 GiB was reclaimable ARC). We fold reclaimable ARC
-//! (`arcstats size − c`) into the cached/available view, matching btop's
-//! `zfs_arc_cached`.
+//! (`arcstats size − c_min`) into the cached/available view, matching
+//! btop's `zfs_arc_cached`.
 
 use crate::fs;
 use crate::meminfo::Meminfo;
@@ -22,7 +22,9 @@ pub struct ArcStats {
     pub c_max: u64,
 }
 
-/// Parse the kstat table: "name type data" rows; we take size/c/c_max.
+/// Parse the kstat table: "name type data" rows; we take size/c_min/c_max.
+/// `c` is the current adaptive target, not the floor, so it must not be
+/// read as `c_min`.
 pub fn parse_arcstats(text: &str) -> Result<ArcStats, String> {
     let mut m: HashMap<&str, u64> = HashMap::new();
     for line in text.lines() {
@@ -35,7 +37,7 @@ pub fn parse_arcstats(text: &str) -> Result<ArcStats, String> {
     }
     Ok(ArcStats {
         size: *m.get("size").ok_or("arcstats: no size")?,
-        c_min: *m.get("c").ok_or("arcstats: no c")?,
+        c_min: *m.get("c_min").ok_or("arcstats: no c_min")?,
         c_max: *m.get("c_max").ok_or("arcstats: no c_max")?,
     })
 }
@@ -111,7 +113,8 @@ name                            type data
 hits                            4    123456
 misses                          4    789
 size                            4    68719476736
-c                               4    4294967296
+c                               4    34359738368
+c_min                           4    4294967296
 c_max                           4    103079215104
 ";
 
@@ -119,10 +122,21 @@ c_max                           4    103079215104
     fn parses_required_keys() {
         let a = parse_arcstats(ARCS).unwrap();
         assert_eq!(a.size, 64 << 30);
+        // c_min, not the 32 GiB adaptive target `c`
         assert_eq!(a.c_min, 4 << 30);
         assert_eq!(a.c_max, 96 << 30);
         // reclaimable = 60 GiB
         assert_eq!(reclaimable(&a), 60 << 30);
+    }
+
+    #[test]
+    fn reclaimable_never_underflows() {
+        let a = ArcStats {
+            size: 1 << 30,
+            c_min: 2 << 30,
+            c_max: 8 << 30,
+        };
+        assert_eq!(reclaimable(&a), 0);
     }
 
     #[test]

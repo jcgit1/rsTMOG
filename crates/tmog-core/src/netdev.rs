@@ -77,6 +77,37 @@ pub enum NetKind {
 }
 
 pub fn read_identity(sys_root: &Path, name: &str) -> NetIdentity {
+    identity_with(sys_root, name, iface_v4(name), iface_v6(sys_root, name))
+}
+
+/// Identities for several interfaces from one link dump, one route dump
+/// and one `if_inet6` read, rather than two netlink dumps and a file read
+/// per interface as repeated `read_identity` calls would do.
+pub fn read_identities(sys_root: &Path, names: &[&str]) -> Vec<NetIdentity> {
+    let routes = local_v4_routes();
+    let inet6 = fs::read_under(sys_root, "proc/net/if_inet6").ok();
+    names
+        .iter()
+        .map(|name| {
+            let v4 = routes
+                .as_ref()
+                .map(|(msgs, links)| parse_local_v4(msgs, links, name))
+                .unwrap_or_default();
+            let v6 = inet6
+                .as_deref()
+                .map(|t| parse_if_inet6(t, name))
+                .unwrap_or_default();
+            identity_with(sys_root, name, v4, v6)
+        })
+        .collect()
+}
+
+fn identity_with(
+    sys_root: &Path,
+    name: &str,
+    mut v4: Vec<Ipv4Addr>,
+    mut v6: Vec<Ipv6Addr>,
+) -> NetIdentity {
     let rel = |f: &str| format!("sys/class/net/{name}/{f}");
     let txt = |f: &str| {
         fs::read_under(sys_root, &rel(f))
@@ -86,10 +117,6 @@ pub fn read_identity(sys_root: &Path, name: &str) -> NetIdentity {
     let speed = fs::read_u64_under(sys_root, &rel("speed"))
         .ok()
         .filter(|&s| s > 0); // -1/0 on wifi/virtual -> None
-    let type_num = fs::read_u64_under(sys_root, &rel("type")).unwrap_or(99);
-    let kind = kind_of(name, type_num, txt("wireless").as_deref());
-    let _ = kind; // identity keeps raw fields; kind() is a method below
-    let (mut v4, mut v6) = (iface_v4(name), iface_v6(sys_root, name));
     v4.sort();
     v4.dedup();
     v6.sort();
@@ -114,17 +141,21 @@ pub fn read_identity(sys_root: &Path, name: &str) -> NetIdentity {
 /// wrong IPs on multi-NIC boxes. Any socket/parse failure degrades to
 /// empty (the page then shows the bare interface name).
 pub fn iface_v4(name: &str) -> Vec<Ipv4Addr> {
-    let Some(links) = nl_dump(NL_RTM_GETLINK, &[0u8; 12]) else {
-        return Vec::new();
-    };
+    match local_v4_routes() {
+        Some((routes, names)) => parse_local_v4(&routes, &names, name),
+        None => Vec::new(),
+    }
+}
+
+/// The raw IPv4 route dump plus the ifindex → name map it refers to.
+fn local_v4_routes() -> Option<(Vec<u8>, std::collections::HashMap<u32, String>)> {
+    let links = nl_dump(NL_RTM_GETLINK, &[0u8; 12])?;
     let names = parse_link_names(&links);
     let mut payload = [0u8; 12];
     payload[0] = 2; // AF_INET
     payload[4] = 254; // RT_TABLE_MAIN
-    let Some(routes) = nl_dump(NL_RTM_GETROUTE, &payload) else {
-        return Vec::new();
-    };
-    parse_local_v4(&routes, &names, name)
+    let routes = nl_dump(NL_RTM_GETROUTE, &payload)?;
+    Some((routes, names))
 }
 
 // ---- netlink plumbing (raw syscalls via extern "C", no libc crate) ----
@@ -495,6 +526,17 @@ Inter-|   Receive                                                |  Transmit
         let u = read_identity(&root, "nope0");
         assert_eq!(u.speed_mbps, None);
         assert_eq!(u.kind(&root), NetKind::Other);
+    }
+
+    #[test]
+    fn batch_identities_match_single_reads() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let names = ["eth-test", "wlan-test", "nope0"];
+        let batch = read_identities(&root, &names);
+        assert_eq!(batch.len(), names.len());
+        for (id, name) in batch.iter().zip(names) {
+            assert_eq!(id, &read_identity(&root, name));
+        }
     }
 
     /// Build one RTM_NEWROUTE message: rtmsg + RTA_DST + RTA_OIF.

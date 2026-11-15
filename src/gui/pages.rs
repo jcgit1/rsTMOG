@@ -111,7 +111,7 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                     .map(|a| {
                         format!(
                             " (ARC {:.1} GiB)",
-                            (a.size - a.c_min) as f64 / (1u64 << 30) as f64
+                            tmog_core::zfs::reclaimable(&a) as f64 / (1u64 << 30) as f64
                         )
                     })
                     .unwrap_or_default();
@@ -226,9 +226,8 @@ fn cpu_summary_line(s: &Snapshot) -> String {
 
 /// Root disk read/write rates and busy %. None when `/` is not a block device.
 fn root_disk_readout(s: &Snapshot) -> Option<String> {
-    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
-    let name = tmog_core::diskstats::root_disk_from_mounts(&mounts)?;
-    Some(format_root_disk(&name, s))
+    let name = s.root_disk.as_deref()?;
+    Some(format_root_disk(name, s))
 }
 
 fn format_root_disk(name: &str, s: &Snapshot) -> String {
@@ -294,9 +293,8 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
         super::graph::graph_ui(ui, &m, 90.0);
         ui.add_space(8.0);
     }
-    // topology + freq/governor header (live from sysfs; cheap files)
-    let root = std::path::Path::new("/");
-    if let Ok(ci) = tmog_core::cpuinfo::collect(root) {
+    // topology + freq/governor header (read by the sampler thread)
+    if let Some(ci) = &s.cpu_info {
         ui.label(
             egui::RichText::new(format!(
                 "{} — {} threads, {} cores, {} socket(s)",
@@ -304,8 +302,7 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
             ))
             .weak(),
         );
-        if let Some(c0) = tmog_core::cpuinfo::present_cpus(root).first().copied() {
-            let f = tmog_core::cpuinfo::read_cpufreq(root, c0);
+        if let Some(f) = &s.cpu0_freq {
             let mhz = |k: Option<u64>| {
                 k.map(|k| format!("{:.0} MHz", k as f64 / 1000.0))
                     .unwrap_or_else(|| "-".into())
@@ -553,7 +550,7 @@ pub fn memory_ui(ui: &mut egui::Ui, s: &Snapshot) {
         ui.label(gib(m.buffers));
         ui.end_row();
         if let Some(a) = s.arc {
-            let rec = (a.size - a.c_min) as f64 / (1u64 << 30) as f64;
+            let rec = tmog_core::zfs::reclaimable(&a) as f64 / (1u64 << 30) as f64;
             ui.label("zfs arc (reclaimable)");
             ui.label(format!(
                 "{rec:.1} GiB of {}",
@@ -585,7 +582,13 @@ pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
         if !tmog_core::diskstats::is_physical_candidate(&d.name) {
             continue;
         }
-        let id = tmog_core::diskstats::read_identity(std::path::Path::new("/"), &d.name);
+        let id = s
+            .disk_ids
+            .iter()
+            .find(|(n, _)| *n == d.name)
+            .map(|(_, id)| id);
+        let model = id.and_then(|i| i.model.clone());
+        let rotational = id.and_then(|i| i.rotational);
         let util = s
             .disk_util
             .iter()
@@ -593,12 +596,12 @@ pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
             .and_then(|(_, u)| *u);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&d.name).strong());
-            ui.label(id.model.unwrap_or("-".into()));
+            ui.label(model.unwrap_or("-".into()));
             ui.label(format!(
                 "read {} M  write {} M  {}  {}",
                 d.read_bytes / 1_000_000,
                 d.write_bytes / 1_000_000,
-                match id.rotational {
+                match rotational {
                     Some(1) => "HDD",
                     Some(_) => "SSD",
                     None => "?",
@@ -657,24 +660,27 @@ pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
             // IP prefix: the address that actually belongs to this
             // interface — exact per-interface mapping from the kernel's
             // route/link tables (netlink) and if_inet6, no heuristics.
-            // Virtual interfaces intentionally show no prefix.
-            let id = tmog_core::netdev::read_identity(std::path::Path::new("/"), &n.name);
-            let kind = id.kind(std::path::Path::new("/"));
-            let my_ip = if kind == tmog_core::netdev::NetKind::Virtual {
-                None
-            } else if let Some(a) = id.ipv6.first() {
-                Some(a.to_string())
-            } else {
-                id.ipv4.first().map(|a| a.to_string())
+            // Virtual interfaces intentionally show no prefix. The sampler
+            // thread reads these; the page only looks them up.
+            let ident = s.net_ids.iter().find(|(id, _)| id.name == n.name);
+            let my_ip = match ident {
+                Some((_, tmog_core::netdev::NetKind::Virtual)) | None => None,
+                Some((id, _)) => id
+                    .ipv6
+                    .first()
+                    .map(|a| a.to_string())
+                    .or_else(|| id.ipv4.first().map(|a| a.to_string())),
             };
             let title = match &my_ip {
                 Some(a) => format!("{a}  {}", n.name),
                 None => n.name.clone(),
             };
             ui.label(egui::RichText::new(title).strong());
-            let speed = id.speed_mbps.map(|s| format!("{s}M")).unwrap_or_default();
-            let mac = id.mac.clone().unwrap_or_default();
-            ui.label(format!("{kind:?} {speed} {mac}"));
+            if let Some((id, kind)) = ident {
+                let speed = id.speed_mbps.map(|s| format!("{s}M")).unwrap_or_default();
+                let mac = id.mac.clone().unwrap_or_default();
+                ui.label(format!("{kind:?} {speed} {mac}"));
+            }
             ui.label(format!("rx {} MB", n.rx_bytes / 1_000_000));
             ui.label(format!("tx {} MB", n.tx_bytes / 1_000_000));
         });
@@ -837,8 +843,8 @@ pub fn system_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 }
             });
     }
-    // cpu model from cpuinfo live
-    if let Ok(ci) = tmog_core::cpuinfo::collect(std::path::Path::new("/")) {
+    // cpu model from cpuinfo (read by the sampler thread)
+    if let Some(ci) = &s.cpu_info {
         ui.label(format!(
             "{} ({} logical, {} cores)",
             ci.model, ci.logical, ci.cores

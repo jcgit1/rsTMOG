@@ -20,7 +20,8 @@ pub struct Proc {
     pub starttime: u64,
     pub nice: i32,
     pub threads: u32,
-    /// resident set size in bytes (statm field 2 * page size)
+    /// resident set size in bytes (stat field 24, refreshed from statm
+    /// field 2 when enriched; both are pages * page size)
     pub rss_bytes: u64,
     /// page faults: minor (stat field 10), major (field 12)
     pub minflt: u64,
@@ -47,14 +48,46 @@ impl Proc {
     }
 
     /// Display name: argv[0] basename for userspace procs, `[comm]` for
-    /// kernel threads.
+    /// kernel threads. Control characters and bidirectional overrides are
+    /// removed; a process chooses both strings itself, and either one can
+    /// reverse or break the rest of the row.
     pub fn display_name(&self) -> String {
         if let Some(exe) = self.cmdline.first()
             && !exe.is_empty()
         {
-            return exe.rsplit('/').next().unwrap_or(exe).to_string();
+            let base = exe.rsplit('/').next().unwrap_or(exe);
+            return visible_name(base);
         }
-        format!("[{}]", self.comm)
+        format!("[{}]", visible_name(&self.comm))
+    }
+}
+
+/// Characters that change how the rest of a cell is drawn, rather than
+/// being part of the name. Right-to-left *letters* stay: a process may
+/// legitimately be named in Arabic or Hebrew. The marks below are the
+/// overrides that reverse the Latin text around them.
+fn spoofs_table_text(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// Drop spoofing characters. A name that was only those becomes `?`, so
+/// the cell is not blank.
+fn visible_name(s: &str) -> String {
+    let cleaned: String = s.chars().filter(|c| !spoofs_table_text(*c)).collect();
+    if cleaned.is_empty() {
+        "?".into()
+    } else {
+        cleaned
     }
 }
 
@@ -110,6 +143,17 @@ pub fn parse_last_cpu(text: &str) -> Option<u32> {
     let rest: Vec<&str> = text[close + 1..].split_whitespace().collect();
     // field 39 -> rest[36]
     rest.get(36).and_then(|v| v.parse::<u32>().ok())
+}
+
+/// Parse just the `rss` field (24) from a /proc/[pid]/stat text: resident
+/// pages, the same count statm reports. None on malformed input.
+pub fn parse_stat_rss_pages(text: &str) -> Option<u64> {
+    let close = text.rfind(')')?;
+    let rest: Vec<&str> = text[close + 1..].split_whitespace().collect();
+    // field 24 -> rest[21]; the kernel prints it signed
+    rest.get(21)
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v.max(0) as u64)
 }
 
 /// Parse the subset of `/proc/[pid]/status` we keep: Uid, VmSwap,
@@ -235,18 +279,40 @@ pub fn collect_one(
     page_bytes: u64,
     passwd: &HashMap<u32, String>,
 ) -> Result<Proc, String> {
-    let mut p = collect_stat_only(root, pid)?;
+    let mut p = collect_stat_only(root, pid, page_bytes)?;
     enrich_one(root, pid, page_bytes, passwd, &mut p);
     Ok(p)
 }
 
-/// Cheap tier: parse only `/proc/[pid]/stat` (pid, comm, state, ppid,
-/// cpu times, nice, threads, starttime). rss/swap/user/cmdline stay
-/// empty until `enrich_one` runs (slow tier, on demand).
-pub fn collect_stat_only(root: &Path, pid: u32) -> Result<Proc, String> {
+/// Cheap tier: `/proc/[pid]/stat` (pid, comm, state, ppid, cpu times,
+/// nice, threads, starttime, rss) plus the uid that owns `/proc/[pid]`.
+/// swap/cmdline and the real uid from status wait for `enrich_one`
+/// (slow tier, on demand).
+///
+/// The directory owner is the effective uid, except for a process that
+/// made itself non-dumpable (gpg-agent, ssh-agent), whose directory is
+/// owned by root until `enrich_one` reads the real uid from status.
+pub fn collect_stat_only(root: &Path, pid: u32, page_bytes: u64) -> Result<Proc, String> {
     use crate::fs;
     let base = format!("proc/{pid}");
-    parse_stat(&fs::read_under(root, &format!("{base}/stat")).map_err(|e| e.to_string())?)
+    let text = fs::read_under(root, &format!("{base}/stat")).map_err(|e| e.to_string())?;
+    let mut p = parse_stat(&text)?;
+    if let Some(pages) = parse_stat_rss_pages(&text) {
+        p.rss_bytes = pages.saturating_mul(page_bytes);
+    }
+    p.uid = dir_owner_uid(&root.join(&base));
+    Ok(p)
+}
+
+#[cfg(unix)]
+fn dir_owner_uid(dir: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(dir).ok().map(|m| m.uid())
+}
+
+#[cfg(not(unix))]
+fn dir_owner_uid(_dir: &Path) -> Option<u32> {
+    None
 }
 
 /// Slow tier: fill in status/statm/cmdline/user for an already-parsed
@@ -359,6 +425,28 @@ mod tests {
     }
 
     #[test]
+    fn stat_rss_field_parsed() {
+        // stat_with_cpu fills field N with N + 100
+        assert_eq!(parse_stat_rss_pages(&stat_with_cpu(42, 5)), Some(124));
+        assert_eq!(parse_stat_rss_pages("9 (z) S 1 9"), None);
+    }
+
+    #[test]
+    fn stat_only_has_memory_and_owner() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/procroot");
+        let line = std::fs::read_to_string(root.join("proc/4321/stat")).unwrap();
+        let p = collect_stat_only(&root, 4321, 4096).unwrap();
+        let pages = parse_stat_rss_pages(&line).unwrap();
+        assert_eq!(p.rss_bytes, pages * 4096);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let owner = std::fs::metadata(root.join("proc/4321")).unwrap().uid();
+            assert_eq!(p.uid, Some(owner));
+        }
+    }
+
+    #[test]
     fn status_supplements() {
         let mut p = parse_stat("1 (init) S 0 1 1 0 -1 4194304 1 0 0 0 5 6 0 0 20 0 3 0 100 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0").unwrap();
         apply_status(
@@ -397,6 +485,24 @@ mod tests {
         p.cmdline.clear();
         p.comm = "kworker/0:1".into();
         assert_eq!(p.display_name(), "[kworker/0:1]");
+    }
+
+    #[test]
+    fn display_name_strips_controls_and_bidi_overrides() {
+        let mut p = parse_stat("1 (a) S 0 1 1 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 5 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0").unwrap();
+        // U+202E reverses the characters that follow it in the cell.
+        p.cmdline = vec!["/usr/bin/evil\u{202e}ls".into()];
+        assert_eq!(p.display_name(), "evills");
+        p.cmdline = vec!["/bin/ok\nname\t\u{001b}[2J".into()];
+        assert_eq!(p.display_name(), "okname[2J");
+        p.cmdline = vec!["/usr/bin/\u{202e}\u{200f}".into()];
+        assert_eq!(p.display_name(), "?");
+        p.cmdline.clear();
+        p.comm = "kthread\u{202e}".into();
+        assert_eq!(p.display_name(), "[kthread]");
+        // Letters with an inherent RTL direction are part of the name.
+        p.cmdline = vec!["/usr/bin/محرر".into()];
+        assert_eq!(p.display_name(), "محرر");
     }
 
     #[test]

@@ -45,7 +45,7 @@ docs/               headless-rendered page screenshots
 
 ## Install
 
-The Linux x86_64 build is [rstmog 0.2.0](https://github.com/jcgit1/rsTMOG/releases/tag/v0.2.0). No Rust toolchain is required. Vulkan and the NVIDIA driver stay on your machine; GTK 3 for the tray is inside the AppImage. It needs glibc 2.35 and Linux 3.2 or newer (Ubuntu 22.04 and later).
+The Linux x86_64 build is [rstmog 0.2.0](https://github.com/jcgit1/rsTMOG/releases/tag/v0.2.0). No Rust toolchain is required. Vulkan, the NVIDIA driver, and libxkbcommon stay on your machine. GTK 3 for the tray is inside the AppImage. It needs glibc 2.35 and Linux 3.2 or newer (Ubuntu 22.04 and later).
 
 ```sh
 cd /tmp
