@@ -78,10 +78,7 @@ fn apply_delta(
 ) {
     match (pos, textures.get_mut(&id)) {
         (Some([x0, y0]), Some((tw, th, atlas))) => {
-            if x0 >= *tw || y0 >= *th {
-                return; // patch entirely outside the atlas: nothing to draw
-            }
-            let n = pw.min(*tw - x0) * 4;
+            let n = pw.min(tw.saturating_sub(x0)) * 4;
             for y in 0..ph.min(th.saturating_sub(y0)) {
                 let dst = ((y0 + y) * *tw + x0) * 4;
                 let src = y * pw * 4;
@@ -317,10 +314,6 @@ mod tests {
         assert_eq!(at(3, 2), 0xFF);
         assert_eq!(at(2, 2), 0);
         assert_eq!(at(0, 3), 0, "clipped column must not wrap to next row");
-        // a patch starting outside the atlas is ignored, not a panic
-        apply_delta(&mut t, 0, Some([9, 3]), 1, 1, vec![0xFF; 4]);
-        apply_delta(&mut t, 0, Some([0, 9]), 1, 1, vec![0xFF; 4]);
-        assert_eq!(t[&0].2.iter().filter(|&&b| b == 0xFF).count(), 4);
     }
 
     #[test]

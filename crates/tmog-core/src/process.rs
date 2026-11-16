@@ -329,6 +329,46 @@ fn dir_owner_uid(_dir: &Path) -> Option<u32> {
     None
 }
 
+/// Medium tier, for the every-row walk: `stat` plus two values every row
+/// needs so the table can sort by them, at no extra file reads:
+/// - resident memory from stat field 24 (`rss`, pages), and
+/// - the owner uid from the `/proc/<pid>` directory itself (one `stat()`).
+///
+/// Before this, rss/user existed only for rows the GUI had enriched, so
+/// sorting by memory or user ignored every process never scrolled to.
+/// The slow tier (`enrich_one`) still refines visible rows: `statm` rss
+/// and the real uid from `status` (a non-dumpable process's directory is
+/// owned by root).
+pub fn collect_row(
+    root: &Path,
+    pid: u32,
+    page_bytes: u64,
+    passwd: &HashMap<u32, String>,
+) -> Result<Proc, String> {
+    use std::os::unix::fs::MetadataExt;
+    let base = format!("proc/{pid}");
+    let text = crate::fs::read_under(root, &format!("{base}/stat")).map_err(|e| e.to_string())?;
+    let mut p = parse_stat(&text)?;
+    if let Some(pages) = parse_rss_pages(&text) {
+        p.rss_bytes = pages.saturating_mul(page_bytes);
+    }
+    if let Ok(md) = std::fs::metadata(root.join(&base)) {
+        p.uid = Some(md.uid());
+        p.user = passwd.get(&md.uid()).cloned();
+    }
+    Ok(p)
+}
+
+/// Resident pages, stat field 24. None on malformed input.
+pub fn parse_rss_pages(text: &str) -> Option<u64> {
+    let close = text.rfind(')')?;
+    // field 3 is rest[0], so field 24 is rest[21]
+    text[close + 1..]
+        .split_whitespace()
+        .nth(21)
+        .and_then(|v| v.parse().ok())
+}
+
 /// Slow tier: fill in status/statm/cmdline/user for an already-parsed
 /// `Proc`. Called only for rows the GUI actually shows (or the followed
 /// pid), which is why it is split from `collect_stat_only`.
@@ -564,6 +604,31 @@ mod tests {
         assert_eq!(cheap_k.display_name(), "[kthreadd]");
         // missing pid dir → error, no panic
         assert!(collect_one(&root, 99999, 4096, &passwd).is_err());
+    }
+
+    #[test]
+    fn rss_from_stat_field_24() {
+        // fields 3..=24 after comm; rss (field 24) = 777 pages
+        let mut f: Vec<String> = (3..=39).map(|i| i.to_string()).collect();
+        f[21] = "777".into();
+        let line = format!("42 (a (b) c) {}", f.join(" "));
+        assert_eq!(parse_rss_pages(&line), Some(777));
+        assert_eq!(parse_rss_pages("1 (x) S 0"), None);
+    }
+
+    #[test]
+    fn collect_row_fills_rss_and_owner_for_every_pid() {
+        use std::os::unix::fs::MetadataExt;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/procroot");
+        let owner = std::fs::metadata(root.join("proc/4321")).unwrap().uid();
+        let mut passwd = HashMap::new();
+        passwd.insert(owner, "fixture-owner".to_string());
+        let p = collect_row(&root, 4321, 4096, &passwd).unwrap();
+        let stat = std::fs::read_to_string(root.join("proc/4321/stat")).unwrap();
+        assert_eq!(p.rss_bytes, parse_rss_pages(&stat).unwrap() * 4096);
+        assert_eq!(p.uid, Some(owner));
+        assert_eq!(p.user.as_deref(), Some("fixture-owner"));
+        assert!(collect_row(&root, 99999, 4096, &passwd).is_err());
     }
 
     #[test]

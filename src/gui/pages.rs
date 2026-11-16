@@ -111,7 +111,7 @@ pub fn summary_ui(ui: &mut egui::Ui, s: &Snapshot) {
                     .map(|a| {
                         format!(
                             " (ARC {:.1} GiB)",
-                            tmog_core::zfs::reclaimable(&a) as f64 / (1u64 << 30) as f64
+                            (a.size - a.c_min) as f64 / (1u64 << 30) as f64
                         )
                     })
                     .unwrap_or_default();
@@ -226,6 +226,7 @@ fn cpu_summary_line(s: &Snapshot) -> String {
 
 /// Root disk read/write rates and busy %. None when `/` is not a block device.
 fn root_disk_readout(s: &Snapshot) -> Option<String> {
+    // resolved by the sampler (no file I/O while painting)
     let name = s.root_disk.as_deref()?;
     Some(format_root_disk(name, s))
 }
@@ -278,12 +279,7 @@ fn gpu_summary_line(g: &tmog_core::gpu::GpuInfo) -> String {
     )
 }
 
-pub fn cpu_ui(
-    ui: &mut egui::Ui,
-    s: &Snapshot,
-    core_panel_mut: &mut Option<usize>,
-    preview: &mut Option<usize>,
-) {
+pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize>) {
     let mut core_panel = *core_panel_mut;
     ui.heading(format!("CPU — {} busy", dash(s.aggregate, "%")));
     if !s.hist_cpu.is_empty() {
@@ -298,8 +294,8 @@ pub fn cpu_ui(
         super::graph::graph_ui(ui, &m, 90.0);
         ui.add_space(8.0);
     }
-    // topology + freq/governor header (read by the sampler thread)
-    if let Some(ci) = &s.cpu_info {
+    // topology + freq/governor header (collected by the sampler)
+    if let Some(ci) = &s.cpuinfo {
         ui.label(
             egui::RichText::new(format!(
                 "{} — {} threads, {} cores, {} socket(s)",
@@ -307,7 +303,7 @@ pub fn cpu_ui(
             ))
             .weak(),
         );
-        if let Some(f) = &s.cpu0_freq {
+        if let Some(f) = &s.cpufreq0 {
             let mhz = |k: Option<u64>| {
                 k.map(|k| format!("{:.0} MHz", k as f64 / 1000.0))
                     .unwrap_or_else(|| "-".into())
@@ -337,11 +333,12 @@ pub fn cpu_ui(
                 .size(11.0),
         );
     }
-    // per-core grid: single-click highlights and leaves a hint up until
-    // the next click; double-click commits the "tasks on this core" panel.
-    // Attribution is approximate; see the panel's own disclaimer.
+    // per-core grid: single-click = transient preview (highlight only),
+    // double-click = commit the "tasks on this core" panel. Attribution
+    // is approximate; see the panel's own disclaimer.
     let cols = (s.per_core.len() as f32).sqrt().ceil().max(1.0) as usize;
     let mut activated: Option<usize> = None; // double-click -> toggle panel
+    let mut preview: Option<usize> = None; // single-click -> highlight
     let mut clear_sel = false;
     egui::Grid::new("cores")
         .num_columns(cols)
@@ -363,12 +360,11 @@ pub fn cpu_ui(
                 let resp = resp.interact(egui::Sense::click());
                 if resp.double_clicked() {
                     activated = Some(i);
-                    *preview = None;
                 } else if resp.clicked() {
-                    *preview = Some(i);
+                    preview = Some(i);
                 }
                 // highlight: the committed panel's core, else a preview click
-                let hot = activated.or(*preview).or(core_panel) == Some(i);
+                let hot = activated.or(preview).or(core_panel) == Some(i);
                 if hot {
                     ui.painter().rect_stroke(
                         resp.rect,
@@ -391,7 +387,7 @@ pub fn cpu_ui(
     }
     // a single-click preview that isn't the open core shows a one-line
     // hint instead of jumping straight into the panel
-    if let Some(i) = (*preview).filter(|p| *p != core_panel.unwrap_or(usize::MAX)) {
+    if let Some(i) = preview.filter(|p| *p != core_panel.unwrap_or(usize::MAX)) {
         let n = s.core_usage.get(&(i as u32)).map(|v| v.len()).unwrap_or(0);
         ui.label(
             egui::RichText::new(format!(
@@ -555,7 +551,7 @@ pub fn memory_ui(ui: &mut egui::Ui, s: &Snapshot) {
         ui.label(gib(m.buffers));
         ui.end_row();
         if let Some(a) = s.arc {
-            let rec = tmog_core::zfs::reclaimable(&a) as f64 / (1u64 << 30) as f64;
+            let rec = (a.size - a.c_min) as f64 / (1u64 << 30) as f64;
             ui.label("zfs arc (reclaimable)");
             ui.label(format!(
                 "{rec:.1} GiB of {}",
@@ -669,11 +665,12 @@ pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
         }
         let id = s
             .disk_ids
-            .iter()
-            .find(|(n, _)| *n == d.name)
-            .map(|(_, id)| id);
-        let model = id.and_then(|i| i.model.clone());
-        let rotational = id.and_then(|i| i.rotational);
+            .get(&d.name)
+            .cloned()
+            .unwrap_or(tmog_core::diskstats::DiskIdentity {
+                model: None,
+                rotational: None,
+            });
         let util = s
             .disk_util
             .iter()
@@ -681,12 +678,12 @@ pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
             .and_then(|(_, u)| *u);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&d.name).strong());
-            ui.label(model.unwrap_or("-".into()));
+            ui.label(id.model.unwrap_or("-".into()));
             ui.label(format!(
                 "read {} M  write {} M  {}  {}",
                 d.read_bytes / 1_000_000,
                 d.write_bytes / 1_000_000,
-                match rotational {
+                match id.rotational {
                     Some(1) => "HDD",
                     Some(_) => "SSD",
                     None => "?",
@@ -745,27 +742,31 @@ pub fn network_ui(ui: &mut egui::Ui, s: &Snapshot) {
             // IP prefix: the address that actually belongs to this
             // interface — exact per-interface mapping from the kernel's
             // route/link tables (netlink) and if_inet6, no heuristics.
-            // Virtual interfaces intentionally show no prefix. The sampler
-            // thread reads these; the page only looks them up.
-            let ident = s.net_ids.iter().find(|(id, _)| id.name == n.name);
-            let my_ip = match ident {
-                Some((_, tmog_core::netdev::NetKind::Virtual)) | None => None,
-                Some((id, _)) => id
-                    .ipv6
-                    .first()
-                    .map(|a| a.to_string())
-                    .or_else(|| id.ipv4.first().map(|a| a.to_string())),
+            // Virtual interfaces intentionally show no prefix.
+            // identity + kind come from the sampler (netlink dumps used
+            // to run here, per interface, on every frame)
+            let Some((id, kind)) = s.net_ids.get(&n.name) else {
+                ui.label(egui::RichText::new(&n.name).strong());
+                ui.label(format!("rx {} MB", n.rx_bytes / 1_000_000));
+                ui.label(format!("tx {} MB", n.tx_bytes / 1_000_000));
+                return;
+            };
+            let kind = *kind;
+            let my_ip = if kind == tmog_core::netdev::NetKind::Virtual {
+                None
+            } else if let Some(a) = id.ipv6.first() {
+                Some(a.to_string())
+            } else {
+                id.ipv4.first().map(|a| a.to_string())
             };
             let title = match &my_ip {
                 Some(a) => format!("{a}  {}", n.name),
                 None => n.name.clone(),
             };
             ui.label(egui::RichText::new(title).strong());
-            if let Some((id, kind)) = ident {
-                let speed = id.speed_mbps.map(|s| format!("{s}M")).unwrap_or_default();
-                let mac = id.mac.clone().unwrap_or_default();
-                ui.label(format!("{kind:?} {speed} {mac}"));
-            }
+            let speed = id.speed_mbps.map(|s| format!("{s}M")).unwrap_or_default();
+            let mac = id.mac.clone().unwrap_or_default();
+            ui.label(format!("{kind:?} {speed} {mac}"));
             ui.label(format!("rx {} MB", n.rx_bytes / 1_000_000));
             ui.label(format!("tx {} MB", n.tx_bytes / 1_000_000));
         });
@@ -928,8 +929,8 @@ pub fn system_ui(ui: &mut egui::Ui, s: &Snapshot) {
                 }
             });
     }
-    // cpu model from cpuinfo (read by the sampler thread)
-    if let Some(ci) = &s.cpu_info {
+    // cpu model from cpuinfo live
+    if let Some(ci) = &s.cpuinfo {
         ui.label(format!(
             "{} ({} logical, {} cores)",
             ci.model, ci.logical, ci.cores
@@ -971,81 +972,6 @@ fn gpu_system_line(g: &tmog_core::gpu::GpuInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn memory_stall_shows_cumulative_and_sample_not_only_avg10() {
-        use tmog_core::pressure::{PsiAvg, PsiRate};
-        let snap = Snapshot {
-            mem: Some(tmog_core::meminfo::Meminfo {
-                mem_total: 1_000_000,
-                mem_available: Some(400_000),
-                ..Default::default()
-            }),
-            psi_memory: Some((
-                PsiAvg {
-                    avg10: 1.5,
-                    avg60: 0.4,
-                    avg300: 0.1,
-                    total_us: 10_937_000,
-                },
-                Some(PsiAvg {
-                    avg10: 1.25,
-                    avg60: 0.3,
-                    avg300: 0.05,
-                    total_us: 10_897_000,
-                }),
-            )),
-            psi_memory_rate: Some(PsiRate {
-                some_percent: 12.5,
-                full_percent: Some(4.0),
-                some_us: 125_000,
-                full_us: Some(40_000),
-                elapsed_us: 1_000_000,
-            }),
-            hist_psi_some: (0..8).map(|t| (t, 12.5)).collect(),
-            hist_psi_full: (0..8).map(|t| (t, 4.0)).collect(),
-            ..Snapshot::default()
-        };
-        let ctx = egui::Context::default();
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 800.0),
-            )),
-            ..Default::default()
-        };
-        let full_output = ctx.run(raw, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                memory_ui(ui, &snap);
-            });
-        });
-        let mut texts = Vec::new();
-        fn collect(shape: &egui::epaint::Shape, texts: &mut Vec<String>) {
-            match shape {
-                egui::epaint::Shape::Text(ts) => texts.push(ts.galley.text().to_owned()),
-                egui::epaint::Shape::Vec(v) => {
-                    for s in v {
-                        collect(s, texts);
-                    }
-                }
-                _ => {}
-            }
-        }
-        for clipped in &full_output.shapes {
-            collect(&clipped.shape, &mut texts);
-        }
-        let joined = texts.join("\n");
-        assert!(joined.contains("since boot"), "{joined}");
-        assert!(joined.contains("10.9s"), "{joined}");
-        assert!(joined.contains("125.0 ms"), "{joined}");
-        assert!(joined.contains("12.50%"), "{joined}");
-        assert!(joined.contains("1.50%"), "{joined}");
-        assert!(joined.contains("1.25%"), "{joined}");
-        assert!(
-            !joined.contains("avg10"),
-            "kernel field name is not the readout\n{joined}"
-        );
-    }
 
     #[test]
     fn civil_from_days_known_dates() {
@@ -1325,5 +1251,80 @@ mod tests {
         // 2026-10-31 21:04 UTC == day 20757 → Sat
         let s = format_boot_time(20_757 * 86_400 + 21 * 3600 + 4 * 60, Some(0.0));
         assert_eq!(s, "Sat 2026-10-31 21:04");
+    }
+
+    #[test]
+    fn memory_stall_shows_cumulative_and_sample_not_only_avg10() {
+        use tmog_core::pressure::{PsiAvg, PsiRate};
+        let snap = Snapshot {
+            mem: Some(tmog_core::meminfo::Meminfo {
+                mem_total: 1_000_000,
+                mem_available: Some(400_000),
+                ..Default::default()
+            }),
+            psi_memory: Some((
+                PsiAvg {
+                    avg10: 1.5,
+                    avg60: 0.4,
+                    avg300: 0.1,
+                    total_us: 10_937_000,
+                },
+                Some(PsiAvg {
+                    avg10: 1.25,
+                    avg60: 0.3,
+                    avg300: 0.05,
+                    total_us: 10_897_000,
+                }),
+            )),
+            psi_memory_rate: Some(PsiRate {
+                some_percent: 12.5,
+                full_percent: Some(4.0),
+                some_us: 125_000,
+                full_us: Some(40_000),
+                elapsed_us: 1_000_000,
+            }),
+            hist_psi_some: (0..8).map(|t| (t, 12.5)).collect(),
+            hist_psi_full: (0..8).map(|t| (t, 4.0)).collect(),
+            ..Snapshot::default()
+        };
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let full_output = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                memory_ui(ui, &snap);
+            });
+        });
+        let mut texts = Vec::new();
+        fn collect(shape: &egui::epaint::Shape, texts: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(ts) => texts.push(ts.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(v) => {
+                    for s in v {
+                        collect(s, texts);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for clipped in &full_output.shapes {
+            collect(&clipped.shape, &mut texts);
+        }
+        let joined = texts.join("\n");
+        assert!(joined.contains("since boot"), "{joined}");
+        assert!(joined.contains("10.9s"), "{joined}");
+        assert!(joined.contains("125.0 ms"), "{joined}");
+        assert!(joined.contains("12.50%"), "{joined}");
+        assert!(joined.contains("1.50%"), "{joined}");
+        assert!(joined.contains("1.25%"), "{joined}");
+        assert!(
+            !joined.contains("avg10"),
+            "kernel field name is not the readout\n{joined}"
+        );
     }
 }
