@@ -45,18 +45,18 @@ docs/               headless-rendered page screenshots
 
 ## Install
 
-The Linux x86_64 build is [rstmog 0.2.0](https://github.com/jcgit1/rsTMOG/releases/tag/v0.2.0). No Rust toolchain is required. Vulkan, the NVIDIA driver, and libxkbcommon stay on your machine. The tray talks to the desktop over the session bus and does not bundle GTK. It needs glibc 2.35 and Linux 3.2 or newer (Ubuntu 22.04 and later).
+The Linux x86_64 build is [rstmog 0.2.2](https://github.com/jcgit1/rsTMOG/releases/tag/v0.2.2). No Rust toolchain is required. Vulkan, the NVIDIA driver, and libxkbcommon stay on your machine. The tray talks to the desktop over the session bus and does not bundle GTK. It needs glibc 2.35 and Linux 3.2 or newer (Ubuntu 22.04 and later).
 
 ```sh
 cd /tmp
-curl -fLO https://github.com/jcgit1/rsTMOG/releases/download/v0.2.0/rstmog-0.2.0-x86_64.AppImage
-curl -fLO https://github.com/jcgit1/rsTMOG/releases/download/v0.2.0/rstmog-0.2.0-x86_64.AppImage.sha256
-sha256sum -c rstmog-0.2.0-x86_64.AppImage.sha256
+curl -fLO https://github.com/jcgit1/rsTMOG/releases/download/v0.2.2/rstmog-0.2.2-x86_64.AppImage
+curl -fLO https://github.com/jcgit1/rsTMOG/releases/download/v0.2.2/rstmog-0.2.2-x86_64.AppImage.sha256
+sha256sum -c rstmog-0.2.2-x86_64.AppImage.sha256
 
 mkdir -p "$HOME/.local/bin" \
   "$HOME/.local/share/applications" \
   "$HOME/.local/share/icons/hicolor/256x256/apps"
-install -m 755 rstmog-0.2.0-x86_64.AppImage "$HOME/.local/bin/rstmog"
+install -m 755 rstmog-0.2.2-x86_64.AppImage "$HOME/.local/bin/rstmog"
 
 tmp=$(mktemp -d)
 ( cd "$tmp" && "$HOME/.local/bin/rstmog" --appimage-extract usr/share/icons/hicolor/256x256/apps/rstmog.png )

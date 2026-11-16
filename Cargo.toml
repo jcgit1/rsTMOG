@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "rstmog"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 description = "rsTMOG — Task Manager OG, rewritten in Rust (Linux)"
 license = "MIT"
