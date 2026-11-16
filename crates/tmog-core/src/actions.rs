@@ -57,6 +57,7 @@ mod platform {
     pub(super) const SIGSTOP: i32 = 19;
     pub(super) const ESRCH: i32 = 3;
     const ENOSYS: i32 = 38;
+    const EPERM: i32 = 1;
     const POLLIN: i16 = 0x1;
     // Syscalls numbered >= 424 share one table across every Linux arch.
     const SYS_PIDFD_SEND_SIGNAL: i64 = 424;
@@ -91,8 +92,31 @@ mod platform {
 
     /// Start time (stat field 22) of the live process at `pid`, if any.
     pub(super) fn read_starttime(pid: i32) -> Option<u64> {
+        read_stat(pid).map(|p| p.starttime)
+    }
+
+    fn read_stat(pid: i32) -> Option<crate::process::Proc> {
         let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        crate::process::parse_stat(&text).ok().map(|p| p.starttime)
+        crate::process::parse_stat(&text).ok()
+    }
+
+    /// The pid still belongs to this start time and has not exited.
+    /// Zombies stay in `/proc` until the parent reaps them.
+    pub(super) fn still_running(pid: i32, starttime: u64) -> bool {
+        read_stat(pid).is_some_and(|p| p.starttime == starttime && p.state != 'Z')
+    }
+
+    /// `pidfd_open` result. `ENOSYS` is an old kernel; `EPERM` is a sandbox
+    /// that blocks the syscall. Both keep the start-time fallback. Any
+    /// other error fails the action.
+    pub(super) fn classify_pidfd(rc: i64, errno: i32) -> Result<Option<i32>, i32> {
+        if rc >= 0 {
+            return Ok(Some(rc as i32));
+        }
+        if errno == ENOSYS || errno == EPERM {
+            return Ok(None);
+        }
+        Err(errno)
     }
 
     impl Pinned {
@@ -100,11 +124,8 @@ mod platform {
         /// The check runs AFTER pinning: once the fd exists it cannot be
         /// re-pointed, so a matching start time proves the fd is ours.
         pub(super) fn new(pid: i32, starttime: u64) -> Result<Pinned, i32> {
-            let fd = match unsafe { syscall(SYS_PIDFD_OPEN, pid as i64, 0i64) } {
-                r if r >= 0 => Some(r as i32),
-                _ if last_errno() == ENOSYS => None,
-                _ => return Err(last_errno()),
-            };
+            let rc = unsafe { syscall(SYS_PIDFD_OPEN, pid as i64, 0i64) };
+            let fd = classify_pidfd(rc, last_errno())?;
             let pinned = Pinned { pid, starttime, fd };
             if read_starttime(pid) != Some(starttime) {
                 return Err(ESRCH); // exited, or pid now belongs to another process
@@ -112,11 +133,19 @@ mod platform {
             Ok(pinned)
         }
 
-        /// Is the pinned process still alive (and so still owns its pid)?
+        /// Is the pinned process still running (and so still owns its pid)?
+        /// A zombie still has a `/proc` entry and the same start time, but
+        /// it has already exited: treating it as alive makes End task wait
+        /// out the grace period and then send a SIGKILL nothing will reap.
         pub(super) fn alive(&self) -> bool {
+            // Zombies and recycled pids are not running, with or without
+            // a pidfd. signal(0) still succeeds on an unreaped zombie.
+            if !still_running(self.pid, self.starttime) {
+                return false;
+            }
             match self.fd {
                 Some(_) => self.signal(0).ok,
-                None => read_starttime(self.pid) == Some(self.starttime),
+                None => true,
             }
         }
 
@@ -441,6 +470,10 @@ pub fn end_task_ref(r: ProcRef, grace: Duration) -> ActionResult {
         Ok(p) => p,
         Err(e) => return e,
     };
+    // Already exited, including a zombie the parent has not reaped.
+    if !p.alive() {
+        return ActionResult::ok();
+    }
     let t = p.signal(platform::SIGTERM);
     if !t.ok {
         return t;
@@ -618,6 +651,7 @@ pub fn set_nice(pid: i32, nice: i32) -> ActionResult {
 mod tests {
     use super::*;
     use platform::SIGTERM;
+    use std::time::Instant;
 
     /// Spawn a child via `sh -c 'exec ...'` that idles; returns its pid.
     /// We use std::process to avoid a fork() wrapper.
@@ -775,6 +809,37 @@ mod tests {
         assert!(set_nice_ref(r, 7).ok);
         assert_eq!(get_nice(r.pid as i32), Ok(7));
         let _ = force_kill_ref(r);
+        let _ = c.wait();
+    }
+
+    #[test]
+    fn pidfd_eperm_falls_back_instead_of_failing() {
+        assert_eq!(platform::classify_pidfd(3, 0), Ok(Some(3)));
+        assert_eq!(platform::classify_pidfd(-1, 38), Ok(None)); // ENOSYS
+        assert_eq!(platform::classify_pidfd(-1, 1), Ok(None)); // EPERM
+        assert_eq!(platform::classify_pidfd(-1, 2), Err(2));
+    }
+
+    #[test]
+    fn end_task_ref_treats_a_zombie_as_already_gone() {
+        let mut c = spawn_child(false);
+        let r = child_ref(&c);
+        assert!(platform::still_running(r.pid as i32, r.starttime));
+        assert!(force_kill(r.pid as i32).ok);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while platform::still_running(r.pid as i32, r.starttime) {
+            if Instant::now() > deadline {
+                panic!("child never became a zombie");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let started = Instant::now();
+        let res = end_task_ref(r, Duration::from_secs(3));
+        assert!(res.ok, "{res:?}");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "end task waited on a zombie"
+        );
         let _ = c.wait();
     }
 

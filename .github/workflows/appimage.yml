@@ -4,18 +4,38 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to attach the AppImage to
+        description: Existing release tag to build and attach the AppImage to
         required: true
         default: v0.2.0
 
+# The build job must not be able to push or replace a release. Only the
+# publish job, which never compiles, holds contents: write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  appimage:
+  build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      # actions/checkout v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Tag matches Cargo.toml
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          ver=$(awk '
+            /^\[package\]/ { in_pkg=1; next }
+            /^\[/ { in_pkg=0 }
+            in_pkg && /^version = / { gsub(/"/, "", $3); print $3; exit }
+          ' Cargo.toml)
+          if [[ "$tag" != "v$ver" ]]; then
+            echo "tag $tag does not match Cargo.toml version $ver"
+            exit 1
+          fi
 
       - name: System packages
         run: |
@@ -27,6 +47,13 @@ jobs:
             file \
             pkg-config \
             patchelf \
+            libgtk-3-dev \
+            libgtk-3-bin \
+            libglib2.0-dev \
+            libglib2.0-bin \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            gobject-introspection \
             libx11-dev \
             libxcursor-dev \
             libxi-dev \
@@ -34,7 +61,10 @@ jobs:
             libxkbcommon-dev \
             libwayland-dev
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      # dtolnay/rust-toolchain master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+        with:
+          toolchain: 1.99.1
 
       - name: Build
         run: |
@@ -47,9 +77,44 @@ jobs:
       - name: Package
         run: bash packaging/appimage/package.sh target/release/rstmog packaging/appimage/dist
 
-      - name: Publish
-        uses: softprops/action-gh-release@v3
+      # actions/upload-artifact v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: appimage
+          path: packaging/appimage/dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      # actions/download-artifact v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: appimage
+          path: dist
+
+      - name: Refuse to replace an existing AppImage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          ver="${tag#v}"
+          asset="rstmog-${ver}-x86_64.AppImage"
+          if names=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then
+            if printf '%s\n' "$names" | grep -Fxq "$asset"; then
+              echo "$tag already has $asset; refusing to replace it"
+              exit 1
+            fi
+          fi
+
+      # softprops/action-gh-release v3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3
         with:
           tag_name: ${{ inputs.tag }}
-          files: packaging/appimage/dist/*
+          files: dist/*
           fail_on_unmatched_files: true
+          overwrite_files: false

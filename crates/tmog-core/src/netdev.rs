@@ -185,7 +185,23 @@ unsafe extern "C" {
     fn connect(fd: i32, addr: *const SockaddrNl, len: u32) -> i32;
     fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize;
     fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize;
+    fn setsockopt(fd: i32, level: i32, optname: i32, optval: *const u8, optlen: u32) -> i32;
     fn close(fd: i32) -> i32;
+}
+
+const SOL_SOCKET: i32 = 1;
+// SO_RCVTIMEO is 20 on 64-bit. 32-bit userspace with 64-bit time_t uses
+// SO_RCVTIMEO_NEW (66) and the same two-i64 timeval.
+const SO_RCVTIMEO: i32 = if cfg!(target_pointer_width = "64") {
+    20
+} else {
+    66
+};
+
+#[repr(C)]
+struct TimeVal {
+    sec: i64,
+    usec: i64,
 }
 
 fn u32le(b: &[u8], i: usize) -> u32 {
@@ -221,6 +237,16 @@ fn nl_dump(msg_type: u16, payload: &[u8]) -> Option<Vec<u8>> {
             close(fd);
             return None;
         }
+        // Identity lookups run on the sampler thread. A reply that never
+        // arrives would freeze every page, so bound each recv.
+        let tv = TimeVal { sec: 1, usec: 0 };
+        let _ = setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &tv as *const TimeVal as *const u8,
+            std::mem::size_of::<TimeVal>() as u32,
+        );
         if send(fd, m.as_ptr(), m.len(), 0) <= 0 {
             close(fd);
             return None;

@@ -11,7 +11,7 @@ use tmog_core::gpu::{GpuInfo, Nvml};
 use tmog_core::loadavg::LoadAvg;
 use tmog_core::meminfo::Meminfo;
 use tmog_core::netdev::NetDevCounters;
-use tmog_core::pressure::PsiAvg;
+use tmog_core::pressure::{PsiAvg, PsiRate};
 use tmog_core::process_table::Row;
 use tmog_core::sysinfo::SysInfo;
 use tmog_core::zfs::ArcStats;
@@ -40,6 +40,11 @@ pub struct Snapshot {
     pub gpu: Option<GpuInfo>,
     pub psi_memory: Option<(PsiAvg, Option<PsiAvg>)>,
     pub psi_io: Option<(PsiAvg, Option<PsiAvg>)>,
+    /// Memory stall since the previous tick. `None` on the first sample
+    /// and when the kernel does not expose PSI. The kernel `avg*` windows
+    /// on `psi_memory` decay back to 0.00 within seconds of a stall; this
+    /// is the counter delta, which is what actually moved.
+    pub psi_memory_rate: Option<PsiRate>,
     pub sysinfo: Option<SysInfo>,
 
     // ---- identity (slow tier: refreshed every IDENT_EVERY ticks or when
@@ -65,6 +70,10 @@ pub struct Snapshot {
     pub hist_gpu_temp: Option<Vec<(u64, f64)>>,
     /// memory used %
     pub hist_mem: Vec<(u64, f64)>,
+    /// memory PSI "some" stall % per tick (counter delta, not avg10)
+    pub hist_psi_some: Vec<(u64, f64)>,
+    /// memory PSI "full" stall % per tick
+    pub hist_psi_full: Vec<(u64, f64)>,
     /// per-physical-disk (name, read B/s, write B/s) sampled rates
     pub hist_disk: RateHistory,
     /// per-interface (name, rx B/s, tx B/s)
@@ -102,6 +111,8 @@ pub struct Sampler {
     prev_disk_busy: std::collections::HashMap<String, (u64, u64)>,
     prev_net_rx: std::collections::HashMap<String, (u64, u64)>,
     prev_net_tx: std::collections::HashMap<String, (u64, u64)>,
+    /// previous memory PSI totals: (some µs, full µs, wall µs)
+    prev_psi_memory: Option<(u64, Option<u64>, u64)>,
     /// cumulative aggregate cpu ticks (USER_HZ) at the last row pass and
     /// now, so the per-process CPU% denominator spans exactly the ticks
     /// between ROW passes
@@ -156,6 +167,7 @@ impl Sampler {
             prev_disk_busy: Default::default(),
             prev_net_rx: Default::default(),
             prev_net_tx: Default::default(),
+            prev_psi_memory: None,
             agg_ticks: 0,
             row_pass_ticks: 0,
             last_was_row: false,
@@ -328,16 +340,11 @@ impl Sampler {
                         if p.user.is_none() {
                             p.user = p.uid.and_then(|u| self.passwd.get(&u).cloned());
                         }
-                        let prev = self
-                            .snapshot
-                            .procs
-                            .iter()
-                            .find(|r| r.proc.pid == pid)
-                            .map(|r| &r.proc);
+                        let prev = previous_proc(&self.snapshot.procs, pid, p.starttime);
                         // aggregate ticks accumulated SINCE the previous
-                        // row pass (since_ticks covers all ticks, so use
-                        // it directly — it equals the row window)
-                        let total_delta = (self.agg_ticks - self.row_pass_ticks).max(1);
+                        // row pass. saturating_sub: a backwards counter
+                        // must not panic in debug builds.
+                        let total_delta = row_window_ticks(self.agg_ticks, self.row_pass_ticks);
                         let cpu_pct = prev.and_then(|pv| {
                             tmog_core::process_table::cpu_percent(pv, &p, total_delta)
                         });
@@ -504,6 +511,35 @@ impl Sampler {
         if let Some(ref m) = self.snapshot.mem_arc_adjusted {
             push(&mut self.snapshot.hist_mem, Some(m.used_percent()));
         }
+        // Memory PSI. avg10 is a 10-second decaying window the kernel
+        // prints as 0.00 the moment the stall ends, so the page was a
+        // frozen "0.00". The live value is the `total` counter's growth
+        // over this tick; the history keeps a stall visible after the
+        // kernel window has forgotten it.
+        if let Some((some, full)) = self.snapshot.psi_memory {
+            if let Some((prev_some, prev_full, prev_us)) = self.prev_psi_memory {
+                self.snapshot.psi_memory_rate = tmog_core::pressure::psi_rate(
+                    prev_some,
+                    some.total_us,
+                    prev_full,
+                    full.map(|f| f.total_us),
+                    now_us.saturating_sub(prev_us),
+                );
+            } else {
+                self.snapshot.psi_memory_rate = None;
+            }
+            self.prev_psi_memory = Some((some.total_us, full.map(|f| f.total_us), now_us));
+            let rate = self.snapshot.psi_memory_rate;
+            if let Some(rate) = rate {
+                push(&mut self.snapshot.hist_psi_some, Some(rate.some_percent));
+                if let Some(full_pct) = rate.full_percent {
+                    push(&mut self.snapshot.hist_psi_full, Some(full_pct));
+                }
+            }
+        } else {
+            self.snapshot.psi_memory_rate = None;
+            self.prev_psi_memory = None;
+        }
         if let Some(ref ct) = self.snapshot.cpu_temp {
             push(&mut self.snapshot.hist_temp, Some(ct.value));
         }
@@ -594,6 +630,19 @@ fn read_pids(root: &std::path::Path) -> Result<Vec<u32>, String> {
     Ok(tmog_core::process::list_pids(root))
 }
 
+/// Previous sample of this process, not merely this pid number.
+fn previous_proc(rows: &[Row], pid: u32, starttime: u64) -> Option<&tmog_core::process::Proc> {
+    rows.iter()
+        .find(|r| r.proc.pid == pid && r.proc.starttime == starttime)
+        .map(|r| &r.proc)
+}
+
+/// Ticks since the last row pass. A counter that steps backwards yields
+/// the minimum window instead of panicking in debug builds.
+fn row_window_ticks(agg: u64, previous_pass: u64) -> u64 {
+    agg.saturating_sub(previous_pass).max(1)
+}
+
 /// sysconf(_SC_PAGESIZE) is 4096 everywhere Linux runs 64-bit today; a
 /// wrong value would only scale RSS display.
 const PAGE_BYTES: u64 = 4096;
@@ -616,6 +665,12 @@ mod tests {
         assert!(!s.snapshot.nets.is_empty());
         assert!(s.snapshot.sysinfo.is_some());
         assert!(s.snapshot.cpu_ticks_delta > 0);
+        if s.snapshot.psi_memory.is_some() {
+            assert!(
+                s.snapshot.psi_memory_rate.is_some(),
+                "second tick should turn the PSI total counter into a rate"
+            );
+        }
         // no detail was requested, yet our own row has real memory and a
         // uid from the cheap pass
         let me = std::process::id();
@@ -654,5 +709,44 @@ mod tests {
         assert_eq!(disk_util(1_000, 1_500, 5_000_000, 6_000_000), Some(50.0));
         // clock stepped backwards: no fabricated value
         assert_eq!(disk_util(1_000, 1_500, 6_000_000, 5_000_000), None);
+    }
+
+    fn bare_proc(pid: u32, starttime: u64, utime: u64) -> tmog_core::process::Proc {
+        tmog_core::process::Proc {
+            pid,
+            comm: "t".into(),
+            state: 'S',
+            ppid: 1,
+            utime,
+            stime: 0,
+            starttime,
+            nice: 0,
+            threads: 1,
+            rss_bytes: 0,
+            minflt: 0,
+            majflt: 0,
+            vm_swap_kib: 0,
+            uid: None,
+            last_cpu: 0,
+            user: None,
+            cmdline: Vec::new(),
+            kthread: false,
+        }
+    }
+
+    #[test]
+    fn cpu_sample_ignores_a_reused_pid() {
+        let rows = vec![Row {
+            proc: bare_proc(10, 100, 50),
+            cpu: None,
+        }];
+        assert!(previous_proc(&rows, 10, 100).is_some());
+        assert!(previous_proc(&rows, 10, 200).is_none());
+    }
+
+    #[test]
+    fn row_window_does_not_underflow() {
+        assert_eq!(row_window_ticks(1_000, 400), 600);
+        assert_eq!(row_window_ticks(10, 50), 1);
     }
 }

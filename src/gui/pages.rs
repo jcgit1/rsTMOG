@@ -570,12 +570,92 @@ pub fn memory_ui(ui: &mut egui::Ui, s: &Snapshot) {
         }
     });
     if let Some((some, full)) = &s.psi_memory {
-        ui.label(format!(
-            "PSI some avg10={:.2}  full avg10={:.2}",
-            some.avg10,
-            full.map(|f| f.avg10).unwrap_or(0.0)
-        ));
+        memory_stall_ui(ui, s, some, full.as_ref());
     }
+}
+
+/// Cumulative PSI `total` (microseconds) as a duration. Sub-second stalls
+/// stay in milliseconds so a short reclaim spike is not rounded into the
+/// same "0.00" the kernel's avg10 field prints.
+fn fmt_stall(us: u64) -> String {
+    if us < 1_000 {
+        format!("{us} us")
+    } else if us < 1_000_000 {
+        format!("{:.1} ms", us as f64 / 1_000.0)
+    } else if us < 60_000_000 {
+        format!("{:.1}s", us as f64 / 1_000_000.0)
+    } else {
+        let secs = us / 1_000_000;
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    }
+}
+
+fn memory_stall_ui(
+    ui: &mut egui::Ui,
+    s: &Snapshot,
+    some: &tmog_core::pressure::PsiAvg,
+    full: Option<&tmog_core::pressure::PsiAvg>,
+) {
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Memory stall").strong());
+    ui.label(format!(
+        "since boot   some {}   full {}",
+        fmt_stall(some.total_us),
+        full.map(|f| fmt_stall(f.total_us))
+            .unwrap_or_else(|| "—".into())
+    ));
+    // Not percent-mode: a 0–100 axis flattens the 1–10% range where
+    // memory stalls actually sit. Rate mode floors the axis near 1%.
+    if !s.hist_psi_some.is_empty() {
+        let mut model = hist_model2(
+            "some",
+            egui::Color32::from_rgb(230, 170, 60),
+            &s.hist_psi_some,
+            "full",
+            egui::Color32::from_rgb(210, 80, 70),
+            &s.hist_psi_full,
+            WINDOW,
+        );
+        model.unit = "%".into();
+        super::graph::graph_ui(ui, &model, 70.0);
+        // The 0% tick is centered on the bottom edge and hangs below the
+        // frame. Without this gap it paints through the next label.
+        ui.add_space(14.0);
+    }
+    let sample = match s.psi_memory_rate {
+        Some(r) => format!(
+            "this sample   some {} ({:.2}%)   full {}",
+            fmt_stall(r.some_us),
+            r.some_percent,
+            match (r.full_us, r.full_percent) {
+                (Some(us), Some(pct)) => format!("{} ({pct:.2}%)", fmt_stall(us)),
+                _ => "—".into(),
+            }
+        ),
+        None => "this sample   some —   full —".into(),
+    };
+    ui.label(sample);
+    let avg = |label: &str, pick: fn(&tmog_core::pressure::PsiAvg) -> f64| {
+        format!(
+            "{label} {:.2}% / {}",
+            pick(some),
+            full.map(|f| format!("{:.2}%", pick(f)))
+                .unwrap_or_else(|| "—".into())
+        )
+    };
+    ui.label(format!(
+        "{}    {}    {}",
+        avg("10s", |p| p.avg10),
+        avg("1m", |p| p.avg60),
+        avg("5m", |p| p.avg300),
+    ));
+    ui.label(
+        egui::RichText::new(
+            "time tasks spent stalled waiting on memory. some: at least one task. full: every runnable task. amber some, red full.",
+        )
+        .small()
+        .weak(),
+    );
 }
 
 pub fn disks_ui(ui: &mut egui::Ui, s: &Snapshot) {
@@ -891,6 +971,81 @@ fn gpu_system_line(g: &tmog_core::gpu::GpuInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_stall_shows_cumulative_and_sample_not_only_avg10() {
+        use tmog_core::pressure::{PsiAvg, PsiRate};
+        let snap = Snapshot {
+            mem: Some(tmog_core::meminfo::Meminfo {
+                mem_total: 1_000_000,
+                mem_available: Some(400_000),
+                ..Default::default()
+            }),
+            psi_memory: Some((
+                PsiAvg {
+                    avg10: 1.5,
+                    avg60: 0.4,
+                    avg300: 0.1,
+                    total_us: 10_937_000,
+                },
+                Some(PsiAvg {
+                    avg10: 1.25,
+                    avg60: 0.3,
+                    avg300: 0.05,
+                    total_us: 10_897_000,
+                }),
+            )),
+            psi_memory_rate: Some(PsiRate {
+                some_percent: 12.5,
+                full_percent: Some(4.0),
+                some_us: 125_000,
+                full_us: Some(40_000),
+                elapsed_us: 1_000_000,
+            }),
+            hist_psi_some: (0..8).map(|t| (t, 12.5)).collect(),
+            hist_psi_full: (0..8).map(|t| (t, 4.0)).collect(),
+            ..Snapshot::default()
+        };
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let full_output = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                memory_ui(ui, &snap);
+            });
+        });
+        let mut texts = Vec::new();
+        fn collect(shape: &egui::epaint::Shape, texts: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(ts) => texts.push(ts.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(v) => {
+                    for s in v {
+                        collect(s, texts);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for clipped in &full_output.shapes {
+            collect(&clipped.shape, &mut texts);
+        }
+        let joined = texts.join("\n");
+        assert!(joined.contains("since boot"), "{joined}");
+        assert!(joined.contains("10.9s"), "{joined}");
+        assert!(joined.contains("125.0 ms"), "{joined}");
+        assert!(joined.contains("12.50%"), "{joined}");
+        assert!(joined.contains("1.50%"), "{joined}");
+        assert!(joined.contains("1.25%"), "{joined}");
+        assert!(
+            !joined.contains("avg10"),
+            "kernel field name is not the readout\n{joined}"
+        );
+    }
 
     #[test]
     fn civil_from_days_known_dates() {
