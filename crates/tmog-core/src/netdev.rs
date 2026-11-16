@@ -185,24 +185,19 @@ unsafe extern "C" {
     fn connect(fd: i32, addr: *const SockaddrNl, len: u32) -> i32;
     fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize;
     fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize;
-    fn setsockopt(fd: i32, level: i32, optname: i32, optval: *const u8, optlen: u32) -> i32;
     fn close(fd: i32) -> i32;
+    fn setsockopt(fd: i32, level: i32, name: i32, val: *const Timeval, len: u32) -> i32;
 }
-
-const SOL_SOCKET: i32 = 1;
-// SO_RCVTIMEO is 20 on 64-bit. 32-bit userspace with 64-bit time_t uses
-// SO_RCVTIMEO_NEW (66) and the same two-i64 timeval.
-const SO_RCVTIMEO: i32 = if cfg!(target_pointer_width = "64") {
-    20
-} else {
-    66
-};
 
 #[repr(C)]
-struct TimeVal {
-    sec: i64,
-    usec: i64,
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i64,
 }
+const SOL_SOCKET: i32 = 1;
+const SO_RCVTIMEO: i32 = 20;
+/// A dump bigger than this is not a route table; stop rather than grow.
+const NL_MAX_DUMP: usize = 16 << 20;
 
 fn u32le(b: &[u8], i: usize) -> u32 {
     (b[i] as u32) | (b[i + 1] as u32) << 8 | (b[i + 2] as u32) << 16 | (b[i + 3] as u32) << 24
@@ -233,20 +228,28 @@ fn nl_dump(msg_type: u16, payload: &[u8]) -> Option<Vec<u8>> {
             pid: 0,
             groups: 0,
         };
+        // Never block forever: this runs on the sampler thread, and a
+        // stalled reply would freeze every page. recv fails after 1 s and
+        // we degrade to "no addresses".
+        let tv = Timeval {
+            tv_sec: 1,
+            tv_usec: 0,
+        };
+        if setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &tv,
+            std::mem::size_of::<Timeval>() as u32,
+        ) != 0
+        {
+            close(fd);
+            return None;
+        }
         if connect(fd, &addr, std::mem::size_of::<SockaddrNl>() as u32) != 0 {
             close(fd);
             return None;
         }
-        // Identity lookups run on the sampler thread. A reply that never
-        // arrives would freeze every page, so bound each recv.
-        let tv = TimeVal { sec: 1, usec: 0 };
-        let _ = setsockopt(
-            fd,
-            SOL_SOCKET,
-            SO_RCVTIMEO,
-            &tv as *const TimeVal as *const u8,
-            std::mem::size_of::<TimeVal>() as u32,
-        );
         if send(fd, m.as_ptr(), m.len(), 0) <= 0 {
             close(fd);
             return None;
@@ -261,6 +264,10 @@ fn nl_dump(msg_type: u16, payload: &[u8]) -> Option<Vec<u8>> {
                 return None;
             }
             out.extend_from_slice(&buf[..n as usize]);
+            if out.len() > NL_MAX_DUMP {
+                close(fd);
+                return None;
+            }
             // Scan the ENTIRE accumulated buffer every pass: DONE may sit
             // mid-chunk or at the start of the next one — the earlier
             // per-chunk scan missed it and discarded the whole dump

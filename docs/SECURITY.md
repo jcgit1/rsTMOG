@@ -22,9 +22,12 @@ advisory.
 `async-std` (discontinued), `pin-utils`, `proc-macro-error`, `ttf-parser`,
 `zbus_names`, `zvariant`, `zvariant_derive` carry unmaintained advisories.
 The zbus/zvariant/async-std chains come transitively from `dark-light`
-(OS dark-mode detection). `cargo audit` treats unmaintained as warnings
-(we have no `audit.toml` denying them); nothing actionable without replacing
-`dark-light` (its 3.0 still depends on `zbus`, though it drops async-std).
+(OS dark-mode detection). `cargo audit` treats unmaintained as warnings;
+`deny.toml` sets `unmaintained = "workspace"`, so `cargo deny check` fails
+only if a *direct* dependency becomes unmaintained (vulnerabilities always
+fail). Nothing actionable without replacing `dark-light` (its 3.0 still
+depends on `zbus`, though it drops async-std); the zbus chain also comes
+from the ksni tray, and `ttf-parser` from egui.
 
 ## Yanked: async-executor 1.14.0
 
@@ -33,7 +36,16 @@ committed `Cargo.lock` now pins it.
 
 ## Release build tools
 
-linuxdeploy, its GTK plugin, appimagetool and the AppImage runtime are
-pinned to tagged releases and SHA-256 verified before they run
+linuxdeploy, appimagetool and the AppImage runtime are pinned to tagged
+releases and SHA-256 verified before they run
 (`packaging/appimage/tools.sh`); nothing is fetched from a `continuous`
 tag.
+
+## Release workflow
+
+`.github/workflows/appimage.yml` builds the tagged source (and refuses a
+tag that doesn't match `Cargo.toml`) in a job with a read-only token that
+is not left in `.git/config`, so dependency build scripts can't write to
+the repo. A separate publish job, which runs no project code, attaches the
+files and never replaces existing assets. Actions are pinned to commit
+SHAs.

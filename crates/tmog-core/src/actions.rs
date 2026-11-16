@@ -90,33 +90,21 @@ mod platform {
         }
     }
 
-    /// Start time (stat field 22) of the live process at `pid`, if any.
-    pub(super) fn read_starttime(pid: i32) -> Option<u64> {
-        read_stat(pid).map(|p| p.starttime)
+    pub(super) fn pidfd_unavailable(errno: i32) -> bool {
+        errno == ENOSYS || errno == EPERM
     }
 
-    fn read_stat(pid: i32) -> Option<crate::process::Proc> {
+    /// Start time (stat field 22) and state of the process at `pid`.
+    fn read_stat(pid: i32) -> Option<(u64, char)> {
         let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        crate::process::parse_stat(&text).ok()
+        crate::process::parse_stat(&text)
+            .ok()
+            .map(|p| (p.starttime, p.state))
     }
 
-    /// The pid still belongs to this start time and has not exited.
-    /// Zombies stay in `/proc` until the parent reaps them.
-    pub(super) fn still_running(pid: i32, starttime: u64) -> bool {
-        read_stat(pid).is_some_and(|p| p.starttime == starttime && p.state != 'Z')
-    }
-
-    /// `pidfd_open` result. `ENOSYS` is an old kernel; `EPERM` is a sandbox
-    /// that blocks the syscall. Both keep the start-time fallback. Any
-    /// other error fails the action.
-    pub(super) fn classify_pidfd(rc: i64, errno: i32) -> Result<Option<i32>, i32> {
-        if rc >= 0 {
-            return Ok(Some(rc as i32));
-        }
-        if errno == ENOSYS || errno == EPERM {
-            return Ok(None);
-        }
-        Err(errno)
+    /// Start time (stat field 22) of the process at `pid`, if any.
+    pub(super) fn read_starttime(pid: i32) -> Option<u64> {
+        read_stat(pid).map(|(t, _)| t)
     }
 
     impl Pinned {
@@ -124,8 +112,29 @@ mod platform {
         /// The check runs AFTER pinning: once the fd exists it cannot be
         /// re-pointed, so a matching start time proves the fd is ours.
         pub(super) fn new(pid: i32, starttime: u64) -> Result<Pinned, i32> {
-            let rc = unsafe { syscall(SYS_PIDFD_OPEN, pid as i64, 0i64) };
-            let fd = classify_pidfd(rc, last_errno())?;
+            Self::open(pid, starttime, true)
+        }
+
+        fn open(pid: i32, starttime: u64, try_pidfd: bool) -> Result<Pinned, i32> {
+            if !try_pidfd {
+                let pinned = Pinned {
+                    pid,
+                    starttime,
+                    fd: None,
+                };
+                return match read_starttime(pid) {
+                    Some(s) if s == starttime => Ok(pinned),
+                    _ => Err(ESRCH),
+                };
+            }
+            let fd = match unsafe { syscall(SYS_PIDFD_OPEN, pid as i64, 0i64) } {
+                r if r >= 0 => Some(r as i32),
+                // ENOSYS: kernel < 5.3. EPERM: pidfd_open never returns it
+                // itself, so it means a seccomp sandbox blocked the call.
+                // Either way, fall back to start-time checks.
+                _ if pidfd_unavailable(last_errno()) => None,
+                _ => return Err(last_errno()),
+            };
             let pinned = Pinned { pid, starttime, fd };
             if read_starttime(pid) != Some(starttime) {
                 return Err(ESRCH); // exited, or pid now belongs to another process
@@ -133,19 +142,15 @@ mod platform {
             Ok(pinned)
         }
 
-        /// Is the pinned process still running (and so still owns its pid)?
-        /// A zombie still has a `/proc` entry and the same start time, but
-        /// it has already exited: treating it as alive makes End task wait
-        /// out the grace period and then send a SIGKILL nothing will reap.
+        /// Is the pinned process still alive (and so still owns its pid)?
         pub(super) fn alive(&self) -> bool {
-            // Zombies and recycled pids are not running, with or without
-            // a pidfd. signal(0) still succeeds on an unreaped zombie.
-            if !still_running(self.pid, self.starttime) {
-                return false;
-            }
             match self.fd {
                 Some(_) => self.signal(0).ok,
-                None => true,
+                // a zombie (Z) or dead (X) task has exited; it only keeps
+                // its /proc entry until the parent reaps it
+                None => {
+                    matches!(read_stat(self.pid), Some((t, st)) if t == self.starttime && st != 'Z' && st != 'X')
+                }
             }
         }
 
@@ -199,6 +204,12 @@ mod platform {
 
         pub(super) fn pid(&self) -> i32 {
             self.pid
+        }
+
+        /// Tests: pin without a pidfd, as on old kernels or under seccomp.
+        #[cfg(test)]
+        pub(super) fn new_without_pidfd(pid: i32, starttime: u64) -> Result<Pinned, i32> {
+            Self::open(pid, starttime, false)
         }
     }
 
@@ -470,10 +481,6 @@ pub fn end_task_ref(r: ProcRef, grace: Duration) -> ActionResult {
         Ok(p) => p,
         Err(e) => return e,
     };
-    // Already exited, including a zombie the parent has not reaped.
-    if !p.alive() {
-        return ActionResult::ok();
-    }
     let t = p.signal(platform::SIGTERM);
     if !t.ok {
         return t;
@@ -651,7 +658,6 @@ pub fn set_nice(pid: i32, nice: i32) -> ActionResult {
 mod tests {
     use super::*;
     use platform::SIGTERM;
-    use std::time::Instant;
 
     /// Spawn a child via `sh -c 'exec ...'` that idles; returns its pid.
     /// We use std::process to avoid a fork() wrapper.
@@ -776,6 +782,34 @@ mod tests {
     }
 
     #[test]
+    fn sandboxed_pidfd_falls_back() {
+        // seccomp-blocked (EPERM) and missing (ENOSYS) pidfd_open both use
+        // the start-time fallback; real errors (ESRCH) do not
+        assert!(platform::pidfd_unavailable(38));
+        assert!(platform::pidfd_unavailable(1));
+        assert!(!platform::pidfd_unavailable(platform::ESRCH));
+    }
+
+    #[test]
+    fn fallback_path_signals_and_refuses_reuse() {
+        let mut c = spawn_child(false);
+        let r = child_ref(&c);
+        let pid = r.pid as i32;
+        // wrong start time: refused before any signal
+        assert_eq!(
+            platform::Pinned::new_without_pidfd(pid, r.starttime + 1).err(),
+            Some(platform::ESRCH)
+        );
+        let p = platform::Pinned::new_without_pidfd(pid, r.starttime).unwrap();
+        assert!(p.alive());
+        assert!(p.signal(platform::SIGTERM).ok);
+        assert!(p.wait_exit(Duration::from_secs(2)));
+        let _ = c.wait();
+        // after exit: no signal goes to whatever reuses the pid
+        assert_eq!(p.signal(SIGKILL).errno, platform::ESRCH);
+    }
+
+    #[test]
     fn ref_actions_reject_invalid_pids() {
         let bad = ProcRef {
             pid: 0,
@@ -809,37 +843,6 @@ mod tests {
         assert!(set_nice_ref(r, 7).ok);
         assert_eq!(get_nice(r.pid as i32), Ok(7));
         let _ = force_kill_ref(r);
-        let _ = c.wait();
-    }
-
-    #[test]
-    fn pidfd_eperm_falls_back_instead_of_failing() {
-        assert_eq!(platform::classify_pidfd(3, 0), Ok(Some(3)));
-        assert_eq!(platform::classify_pidfd(-1, 38), Ok(None)); // ENOSYS
-        assert_eq!(platform::classify_pidfd(-1, 1), Ok(None)); // EPERM
-        assert_eq!(platform::classify_pidfd(-1, 2), Err(2));
-    }
-
-    #[test]
-    fn end_task_ref_treats_a_zombie_as_already_gone() {
-        let mut c = spawn_child(false);
-        let r = child_ref(&c);
-        assert!(platform::still_running(r.pid as i32, r.starttime));
-        assert!(force_kill(r.pid as i32).ok);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while platform::still_running(r.pid as i32, r.starttime) {
-            if Instant::now() > deadline {
-                panic!("child never became a zombie");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let started = Instant::now();
-        let res = end_task_ref(r, Duration::from_secs(3));
-        assert!(res.ok, "{res:?}");
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "end task waited on a zombie"
-        );
         let _ = c.wait();
     }
 

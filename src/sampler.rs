@@ -704,6 +704,33 @@ mod tests {
     }
 
     #[test]
+    fn reused_pid_gets_no_cpu_from_the_old_process() {
+        let mut s = Sampler::new();
+        s.tick();
+        let me = std::process::id();
+        // Pretend the previous row for our pid was a different process
+        // (same pid, other start time) with far fewer CPU ticks.
+        for r in s.snapshot.procs.iter_mut().filter(|r| r.proc.pid == me) {
+            r.proc.starttime = r.proc.starttime.wrapping_add(1);
+            r.proc.utime = 0;
+            r.proc.stime = 0;
+        }
+        // run to the next row pass
+        for _ in 0..10 {
+            s.tick();
+            if s.last_tick_was_row() {
+                break;
+            }
+        }
+        assert!(s.last_tick_was_row(), "no row pass happened");
+        let row = s.snapshot.procs.iter().find(|r| r.proc.pid == me).unwrap();
+        assert_eq!(
+            row.cpu, None,
+            "CPU% must not be computed against another process"
+        );
+    }
+
+    #[test]
     fn disk_util_converts_the_microsecond_window() {
         // busy 500 ms of a 1 s window
         assert_eq!(disk_util(1_000, 1_500, 5_000_000, 6_000_000), Some(50.0));
