@@ -95,6 +95,13 @@ impl App {
 
     /// Drain tray menu events into app behavior.
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
+        // second-instance ping: surface the window exactly like tray
+        // "Open" (Visible+Focus is the app-internal raise path; Wayland
+        // forbids raising from outside)
+        if crate::single::surface_requested() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         let Some(tray) = &self.tray else { return };
         while let Some(ev) = tray.try_event() {
             match ev {
@@ -610,6 +617,32 @@ impl App {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    // Single instance: one window per session. A second launch focuses the
+    // running one (SIGUSR1 → its repaint loop shows/focuses the window)
+    // and exits — no new process, no extra sampler thread.
+    let lock_path = crate::single::lock_path();
+    let _lock = match crate::single::acquire(&lock_path) {
+        crate::single::Acquisition::Acquired(l) => l,
+        crate::single::Acquisition::Running { holder_pid } => {
+            match holder_pid {
+                Some(pid) if crate::single::request_surface(pid) => {
+                    // the running instance surfaces its window; we are done
+                    return Ok(());
+                }
+                Some(pid) => {
+                    eprintln!("rstmog: already running (pid {pid}) but could not focus it");
+                    return Ok(());
+                }
+                None => {
+                    // lock contended but the holder is gone (died between
+                    // flock and our read) — refuse rather than open a
+                    // second window on a race
+                    eprintln!("rstmog: another instance holds the session lock; not opening");
+                    return Ok(());
+                }
+            }
+        }
+    };
     let app = App::new();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -627,6 +660,8 @@ pub fn run() -> anyhow::Result<()> {
         // The window runs the same App (and its one sampler thread) that
         // supplied the icon theme above.
         Box::new(move |_cc| {
+            // Second-instance focus pings land here (see single.rs).
+            crate::single::install_surface_handler();
             // System tray with Open / refresh-rate / Quit menu. Best-effort:
             // platforms without a tray (some Wayland setups) continue without.
             let tray = crate::traythread::spawn("dark", "rsTMOG", 1000);
