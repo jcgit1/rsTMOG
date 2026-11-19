@@ -9,6 +9,7 @@ mod gui;
 mod headless;
 pub mod icons;
 mod sampler;
+mod single;
 mod traythread;
 
 use std::path::Path;
