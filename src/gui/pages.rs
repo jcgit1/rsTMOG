@@ -436,8 +436,8 @@ pub fn cpu_ui(ui: &mut egui::Ui, s: &Snapshot, core_panel_mut: &mut Option<usize
                             ui.label(egui::RichText::new(r.proc.display_name()).monospace());
                             ui.label(
                                 r.cpu
-                                    .map(|c| format!("{c:.1}%"))
-                                    .unwrap_or_else(|| "-".into()),
+                                    .filter(|c| *c > 0.0)
+                                    .map_or_else(|| "-".to_string(), |c| format!("{c:.1}%")),
                             );
                             ui.label(user_or_uid(&r.proc));
                         });

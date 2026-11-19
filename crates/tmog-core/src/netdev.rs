@@ -84,12 +84,7 @@ pub fn read_identity(sys_root: &Path, name: &str) -> NetIdentity {
 /// dump in total (`read_identity` does both per interface). For callers
 /// that refresh every interface at once, i.e. the sampler.
 pub fn read_identities(sys_root: &Path, names: &[String]) -> Vec<NetIdentity> {
-    let dumps = nl_dump(NL_RTM_GETLINK, &[0u8; 12]).and_then(|links| {
-        let mut payload = [0u8; 12];
-        payload[0] = 2; // AF_INET
-        payload[4] = 254; // RT_TABLE_MAIN
-        nl_dump(NL_RTM_GETROUTE, &payload).map(|routes| (parse_link_names(&links), routes))
-    });
+    let dumps = dump_links_and_routes();
     names
         .iter()
         .map(|name| {
@@ -137,17 +132,32 @@ fn identity_with_v4(sys_root: &Path, name: &str, mut v4: Vec<Ipv4Addr>) -> NetId
 /// wrong IPs on multi-NIC boxes. Any socket/parse failure degrades to
 /// empty (the page then shows the bare interface name).
 pub fn iface_v4(name: &str) -> Vec<Ipv4Addr> {
-    let Some(links) = nl_dump(NL_RTM_GETLINK, &[0u8; 12]) else {
-        return Vec::new();
-    };
-    let names = parse_link_names(&links);
-    let mut payload = [0u8; 12];
-    payload[0] = 2; // AF_INET
-    payload[4] = 254; // RT_TABLE_MAIN
-    let Some(routes) = nl_dump(NL_RTM_GETROUTE, &payload) else {
+    let Some((names, routes)) = dump_links_and_routes() else {
         return Vec::new();
     };
     parse_local_v4(&routes, &names, name)
+}
+
+/// Request payload for `RTM_GETLINK` dump: `struct ifinfomsg` is 16 bytes
+/// (family, pad, type, index, flags, change). Sending 12 bytes makes the
+/// kernel fall back to `rtgenmsg` (4 bytes) and log
+/// `netlink: 8 bytes leftover after parsing attributes` on every dump.
+fn link_dump_payload() -> [u8; 16] {
+    [0u8; 16]
+}
+
+/// Request payload for `RTM_GETROUTE` dump: `struct rtmsg` is 12 bytes.
+fn route_v4_main_dump_payload() -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0] = 2; // AF_INET
+    payload[4] = 254; // RT_TABLE_MAIN
+    payload
+}
+
+fn dump_links_and_routes() -> Option<(std::collections::HashMap<u32, String>, Vec<u8>)> {
+    let links = nl_dump(NL_RTM_GETLINK, &link_dump_payload())?;
+    let routes = nl_dump(NL_RTM_GETROUTE, &route_v4_main_dump_payload())?;
+    Some((parse_link_names(&links), routes))
 }
 
 // ---- netlink plumbing (raw syscalls via extern "C", no libc crate) ----
@@ -648,16 +658,49 @@ Inter-|   Receive                                                |  Transmit
     }
 
     #[test]
+    fn dump_payloads_match_kernel_header_sizes() {
+        // RTM_GETLINK expects struct ifinfomsg (16 bytes); 12 bytes triggers
+        // the kernel's "8 bytes leftover after parsing attributes" warning.
+        assert_eq!(link_dump_payload(), [0u8; 16]);
+        let rt = route_v4_main_dump_payload();
+        assert_eq!(rt.len(), 12);
+        assert_eq!(rt[0], 2); // AF_INET
+        assert_eq!(rt[4], 254); // RT_TABLE_MAIN
+    }
+
+    #[test]
     fn live_netlink_matches_ip_route_local() {
         // against the running kernel: every address iface_v4 reports for
         // an iface must appear as `local <addr> dev <iface>` in the
         // route table. (Skipped off Linux / sandboxed CI where netlink
         // is unavailable: iface_v4 degrades to empty.)
-        let wlan = iface_v4("lo");
-        if wlan.is_empty() {
+        let lo = iface_v4("lo");
+        if lo.is_empty() {
             return; // no netlink here (CI sandbox) — nothing to compare
         }
-        assert!(wlan.iter().all(|a| a.is_loopback()));
+        assert!(
+            lo.contains(&Ipv4Addr::LOCALHOST),
+            "lo missing 127.0.0.1: {lo:?}"
+        );
+        if let Ok(out) = std::process::Command::new("ip")
+            .args(["-4", "route", "show", "table", "local", "dev", "lo"])
+            .output()
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for addr in &lo {
+                let needle = format!("local {addr} ");
+                assert!(
+                    text.lines().any(|l| l.starts_with(&needle)),
+                    "{addr} not found as `{needle}` in:\n{text}"
+                );
+            }
+        } else {
+            assert!(
+                lo.iter().all(|a| a.is_loopback()),
+                "unexpected lo addrs: {lo:?}"
+            );
+        }
     }
 
     #[test]
