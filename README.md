@@ -7,7 +7,7 @@ Task Manager OG), inspired by the behavioral design of
 [evildojo-tmog](https://github.com/mikedesu/evildojo-tmog) (MIT, Michael
 Bell). No C++ code is ported line-by-line; the Rust is written idiomatically.
 
-![Summary page](docs/capture-summary.png)
+![rsTMOG open on the Summary page](docs/screenshot-summary.png)
 
 ## What you get
 
@@ -30,6 +30,10 @@ Bell). No C++ code is ported line-by-line; the Rust is written idiomatically.
   through the real egui pipeline with a software rasterizer — no GPU or
   window server needed. `--smoke` runs it across all pages as a CI gate.
 
+![Processes page](docs/screenshot-processes.png)
+![CPU page](docs/screenshot-cpu.png)
+![Memory page](docs/screenshot-memory.png)
+
 ## Layout
 
 ```
@@ -40,7 +44,7 @@ src/                rstmog bin: egui frontend (gui/, graph widget,
                     tray/icons, headless capture, CLI
 assets/icons/       app icons (dark/light, 16-1024 px + SVG)
 packaging/          .desktop entry + installer for KDE/GNOME menus
-docs/               headless-rendered page screenshots
+docs/               README screenshots and headless page captures
 ```
 
 ## Install
